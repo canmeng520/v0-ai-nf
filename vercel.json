@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm --filter @ai-proxy/web build",
+  "outputDirectory": "apps/web/dist",
+  "installCommand": "pnpm install --no-frozen-lockfile",
+  "framework": null,
+  "rewrites": [
+    { "source": "/api/healthz", "destination": "/api/proxy?__p=healthz" },
+    { "source": "/healthz", "destination": "/api/proxy?__p=healthz" },
+    { "source": "/v1", "destination": "/api/proxy?__p=v1" },
+    { "source": "/v1/:path*", "destination": "/api/proxy?__p=v1/:path*" }
+  ]
+}
