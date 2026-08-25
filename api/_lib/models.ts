@@ -113,7 +113,12 @@ async function probeUrl(url: string, headers: Record<string, string>): Promise<{
       const pagedUrl = cursor ? `${url}${url.includes("?") ? "&" : "?"}limit=1000&after_id=${encodeURIComponent(cursor)}` : url
       let res: Response
       try {
-        res = await fetch(pagedUrl, { headers, signal: controller.signal })
+        // Some gateways (notably the Netlify AI Gateway) reject a GET whose
+        // Content-Type isn't application/json — send it even though there's no body.
+        res = await fetch(pagedUrl, {
+          headers: { accept: "application/json", "content-type": "application/json", ...headers },
+          signal: controller.signal,
+        })
       } finally {
         clearTimeout(timer)
       }
