@@ -9,14 +9,15 @@ import type { Request as ExpressRequest, Response as ExpressResponse } from "exp
 import { toExpressReq, WebResShim } from "../../api/_lib/web-adapter.js"
 import { isAuthorized, UNAUTHORIZED_BODY } from "../../api/_lib/auth.js"
 import { buildHealth } from "../../api/_lib/health.js"
-import { listModels } from "../../api/_lib/models.js"
+import { listModels, debugEnabled } from "../../api/_lib/models.js"
 import { handleChatCompletions } from "../../api/_lib/routes/chat-completions.js"
 import { handleMessages } from "../../api/_lib/routes/messages.js"
+import { redactErrorMessage } from "../../api/_lib/redact.js"
 
 export default async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url)
   const pathname = url.pathname
-  const debug = url.searchParams.get("debug") === "1" || url.searchParams.get("debug") === "true"
+  const debug = debugEnabled() && (url.searchParams.get("debug") === "1" || url.searchParams.get("debug") === "true")
   const res = new WebResShim(request.signal)
 
   // CORS — mirrors the Express `cors({ origin: true })` middleware.
@@ -43,7 +44,7 @@ export default async function handler(request: Request): Promise<Response> {
   void dispatch(pathname, request.method, xreq, res).catch((err) => {
     if (!res.headersSent) {
       res.status(500).json({
-        error: { message: err instanceof Error ? err.message : "internal server error", type: "internal_error" },
+        error: { message: err instanceof Error ? redactErrorMessage(err) : "internal server error", type: "internal_error" },
       })
     } else if (!res.writableEnded) {
       res.end()

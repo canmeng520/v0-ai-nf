@@ -342,6 +342,15 @@ export async function fetchUpstreamModels(
   return { models, probes, supplementedAnthropic }
 }
 
+/**
+ * Whether `?debug=1` on /v1/models is honored. Off by default because the debug
+ * block reveals upstream base URLs/hosts (the channel). Set ALLOW_MODELS_DEBUG=1
+ * to enable it for operator diagnosis.
+ */
+export function debugEnabled(): boolean {
+  return process.env.ALLOW_MODELS_DEBUG === "1" || process.env.ALLOW_MODELS_DEBUG === "true"
+}
+
 /** Which credential/base-URL env vars are present + the resolved bases (no secrets). */
 function envDiag(ctx: UpstreamCtx) {
   const has = (n: string) => Boolean(process.env[n])

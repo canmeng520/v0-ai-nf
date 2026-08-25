@@ -1,5 +1,6 @@
 import type { Response } from "express"
 import { parseSseStream, writeSseData, writeSseDone, writeSseEvent } from "./sse.js"
+import { redactUrls, redactErrorMessage } from "./redact.js"
 
 // =============================================================
 // Anthropic SSE -> OpenAI chat.completion.chunk SSE
@@ -126,7 +127,7 @@ export async function pipeAnthropicStreamToOpenai(
         case "error": {
           const errPayload = {
             error: {
-              message: parsed.error?.message ?? "upstream error",
+              message: redactUrls(parsed.error?.message ?? "upstream error"),
               type: parsed.error?.type ?? "upstream_error",
             },
           }
@@ -146,7 +147,7 @@ export async function pipeAnthropicStreamToOpenai(
     writeSseDone(res)
   } catch (err) {
     writeSseData(res, {
-      error: { message: err instanceof Error ? err.message : String(err), type: "stream_error" },
+      error: { message: redactErrorMessage(err), type: "stream_error" },
     })
     writeSseDone(res)
   } finally {
@@ -303,7 +304,7 @@ export async function pipeOpenaiStreamToAnthropic(
     })
     send("message_stop", {})
   } catch (err) {
-    send("error", { error: { type: "stream_error", message: err instanceof Error ? err.message : String(err) } })
+    send("error", { error: { type: "stream_error", message: redactErrorMessage(err) } })
   } finally {
     if (!res.writableEnded) res.end()
   }

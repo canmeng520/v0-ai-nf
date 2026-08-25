@@ -1,3 +1,5 @@
+import { redactUrls, redactDeep } from "./redact.js"
+
 const VERCEL_GATEWAY_BASE = "https://ai-gateway.vercel.sh"
 
 export interface UpstreamConfig {
@@ -159,7 +161,11 @@ export function sanitizeAnthropicBody<T extends Record<string, unknown>>(body: T
   return out ?? body
 }
 
-/** Read an upstream error response safely (text first, then optional JSON parse). */
+/**
+ * Read an upstream error response safely (text first, then optional JSON parse).
+ * URLs/hosts are redacted from both `raw` and `json` so forwarding an upstream
+ * error to the client never leaks the channel/endpoint.
+ */
 export async function readUpstreamError(
   response: Response,
 ): Promise<{ status: number; raw: string; json: unknown }> {
@@ -177,5 +183,5 @@ export async function readUpstreamError(
       json = undefined
     }
   }
-  return { status: response.status, raw, json }
+  return { status: response.status, raw: redactUrls(raw), json: json === undefined ? undefined : redactDeep(json) }
 }
