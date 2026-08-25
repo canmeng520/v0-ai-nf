@@ -14,7 +14,9 @@ import { handleChatCompletions } from "../../api/_lib/routes/chat-completions.js
 import { handleMessages } from "../../api/_lib/routes/messages.js"
 
 export default async function handler(request: Request): Promise<Response> {
-  const pathname = new URL(request.url).pathname
+  const url = new URL(request.url)
+  const pathname = url.pathname
+  const debug = url.searchParams.get("debug") === "1" || url.searchParams.get("debug") === "true"
   const res = new WebResShim(request.signal)
 
   // CORS — mirrors the Express `cors({ origin: true })` middleware.
@@ -62,8 +64,8 @@ export default async function handler(request: Request): Promise<Response> {
         w.status(401).json(UNAUTHORIZED_BODY)
         return
       }
-      const data = await listModels({})
-      w.json({ object: "list", data })
+      const ml = await listModels({}, { debug })
+      w.json({ object: "list", data: ml.data, ...(ml._debug ? { _debug: ml._debug } : {}) })
       return
     }
 

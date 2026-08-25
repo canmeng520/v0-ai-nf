@@ -75,29 +75,103 @@ interface RawModel {
   [k: string]: unknown
 }
 
-/** Fetch a `/models`-style list from one upstream. `path` is appended to baseUrl. */
+/** One attempted `/models` request — captured so `?debug=1` can explain a miss. */
+export interface ProbeDiag {
+  url: string
+  auth: "bearer" | "x-api-key"
+  status: number | null
+  ok: boolean
+  count: number
+  error?: string
+  bodySnippet?: string
+}
+
+/** Extract model ids from whatever list shape an upstream returns. */
+function extractIds(json: unknown): string[] {
+  const list: RawModel[] = Array.isArray(json)
+    ? (json as RawModel[])
+    : ((json as { data?: RawModel[]; models?: RawModel[] })?.data ??
+        (json as { models?: RawModel[] })?.models ??
+        [])
+  if (!Array.isArray(list)) return []
+  return list.map((m) => (typeof m === "string" ? m : m.id)).filter((id): id is string => Boolean(id))
+}
+
+/**
+ * GET one candidate `/models` URL. Follows Anthropic-style cursor pagination
+ * (`has_more` + `last_id`) up to a few pages so large catalogues aren't truncated.
+ */
+async function probeUrl(url: string, headers: Record<string, string>): Promise<{ ids: string[]; diag: ProbeDiag }> {
+  const auth: ProbeDiag["auth"] = headers.authorization ? "bearer" : "x-api-key"
+  const diag: ProbeDiag = { url, auth, status: null, ok: false, count: 0 }
+  const ids: string[] = []
+  let cursor: string | null = null
+  try {
+    for (let page = 0; page < 10; page++) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 6000)
+      const pagedUrl = cursor ? `${url}${url.includes("?") ? "&" : "?"}limit=1000&after_id=${encodeURIComponent(cursor)}` : url
+      let res: Response
+      try {
+        res = await fetch(pagedUrl, { headers, signal: controller.signal })
+      } finally {
+        clearTimeout(timer)
+      }
+      diag.status = res.status
+      diag.ok = res.ok
+      const text = await res.text()
+      if (!res.ok) {
+        diag.bodySnippet = text.slice(0, 300)
+        break
+      }
+      let json: unknown
+      try {
+        json = JSON.parse(text)
+      } catch {
+        diag.error = "non-JSON response"
+        diag.bodySnippet = text.slice(0, 300)
+        break
+      }
+      ids.push(...extractIds(json))
+      const more = (json as { has_more?: boolean })?.has_more
+      cursor = (json as { last_id?: string })?.last_id ?? null
+      if (!more || !cursor) break
+    }
+  } catch (err) {
+    diag.error = err instanceof Error ? err.message : String(err)
+  }
+  diag.count = ids.length
+  return { ids, diag }
+}
+
+/**
+ * Probe an upstream for its model list, trying the sensible candidate paths for
+ * its shape (`/models` and `/v1/models`, with/without a `/v1` base suffix). The
+ * first candidate that returns ids wins; all attempts are recorded for debug.
+ */
 async function probeModels(
   cfg: UpstreamConfig,
-  path: string,
   headers: Record<string, string>,
-): Promise<string[]> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 8000)
-  try {
-    const res = await fetch(`${cfg.baseUrl}${path}`, { headers, signal: controller.signal })
-    if (!res.ok) {
-      logger.warn({ status: res.status, origin: cfg.origin, path }, "models probe non-ok")
-      return []
-    }
-    const json = (await res.json()) as { data?: RawModel[]; models?: RawModel[] } | RawModel[]
-    const list: RawModel[] = Array.isArray(json) ? json : (json.data ?? json.models ?? [])
-    return list.map((m) => (typeof m === "string" ? m : m.id)).filter((id): id is string => Boolean(id))
-  } catch (err) {
-    logger.warn({ err, origin: cfg.origin, path }, "models probe failed")
-    return []
-  } finally {
-    clearTimeout(timer)
+  kind: "openai" | "anthropic",
+): Promise<{ ids: string[]; diags: ProbeDiag[] }> {
+  const base = cfg.baseUrl.replace(/\/+$/, "")
+  const hasV1 = /\/v1$/.test(base)
+  const candidates =
+    kind === "anthropic"
+      ? [hasV1 ? `${base}/models` : `${base}/v1/models`, `${base}/models`]
+      : [hasV1 ? `${base}/models` : `${base}/v1/models`, `${base}/v1/models`, `${base}/models`]
+
+  const seen = new Set<string>()
+  const diags: ProbeDiag[] = []
+  for (const url of candidates) {
+    if (seen.has(url)) continue
+    seen.add(url)
+    const { ids, diag } = await probeUrl(url, headers)
+    diags.push(diag)
+    if (ids.length > 0) return { ids, diags }
   }
+  logger.warn({ origin: cfg.origin, diags }, "models probe found nothing")
+  return { ids: [], diags }
 }
 
 /**
@@ -110,18 +184,16 @@ async function probeModels(
  * Ids are de-duplicated and provider-prefixes stripped. Returns `[]` when nothing
  * could be fetched so the caller can fall back to the static list.
  */
-export async function fetchUpstreamModels(ctx: UpstreamCtx = {}): Promise<ModelInfo[]> {
+export async function fetchUpstreamModels(
+  ctx: UpstreamCtx = {},
+): Promise<{ models: ModelInfo[]; probes: ProbeDiag[] }> {
   const openaiCfg = getOpenAIConfig(ctx)
   const anthropicCfg = getAnthropicConfig(ctx)
 
-  const probes: Promise<{ ids: string[]; hint?: Provider }>[] = []
+  const tasks: Promise<{ ids: string[]; diags: ProbeDiag[]; hint?: Provider }>[] = []
 
   if (openaiCfg.apiKey) {
-    probes.push(
-      probeModels(openaiCfg, "/models", {
-        authorization: `Bearer ${openaiCfg.apiKey}`,
-      }).then((ids) => ({ ids })),
-    )
+    tasks.push(probeModels(openaiCfg, { authorization: `Bearer ${openaiCfg.apiKey}` }, "openai"))
   }
 
   // Skip the Anthropic probe when it resolves to the same unified gateway the
@@ -131,14 +203,16 @@ export async function fetchUpstreamModels(ctx: UpstreamCtx = {}): Promise<ModelI
     const headers: Record<string, string> = { "anthropic-version": "2023-06-01" }
     if (anthropicCfg.gateway) headers.authorization = `Bearer ${anthropicCfg.apiKey}`
     else headers["x-api-key"] = anthropicCfg.apiKey
-    probes.push(probeModels(anthropicCfg, "/v1/models", headers).then((ids) => ({ ids, hint: "anthropic" as const })))
+    tasks.push(probeModels(anthropicCfg, headers, "anthropic").then((r) => ({ ...r, hint: "anthropic" as const })))
   }
 
-  const results = await Promise.all(probes)
+  const results = await Promise.all(tasks)
 
   const seen = new Set<string>()
   const models: ModelInfo[] = []
-  for (const { ids, hint } of results) {
+  const probes: ProbeDiag[] = []
+  for (const { ids, diags, hint } of results) {
+    probes.push(...diags)
     for (const raw of ids) {
       const { id, provider } = stripProviderPrefix(raw)
       if (seen.has(id)) continue
@@ -147,14 +221,19 @@ export async function fetchUpstreamModels(ctx: UpstreamCtx = {}): Promise<ModelI
       models.push({ id, provider: resolved, context_window: FALLBACK_MAP.get(id)?.context_window ?? 0 })
     }
   }
-  return models
+  return { models, probes }
 }
 
-/** OpenAI-compatible `/v1/models` payload, sourced live from the upstream. */
-export async function listModels(ctx: UpstreamCtx = {}) {
-  let models = await fetchUpstreamModels(ctx)
-  if (models.length === 0) models = FALLBACK_MODELS
-  return models.map((m) => ({
+/**
+ * OpenAI-compatible `/v1/models` payload, sourced live from the upstream. When
+ * `debug` is set the payload carries a `_debug` block explaining every probe
+ * attempt (URL, status, error) so an incomplete list can be diagnosed.
+ */
+export async function listModels(ctx: UpstreamCtx = {}, opts: { debug?: boolean } = {}) {
+  const { models: fetched, probes } = await fetchUpstreamModels(ctx)
+  const usedFallback = fetched.length === 0
+  const models = usedFallback ? FALLBACK_MODELS : fetched
+  const data = models.map((m) => ({
     id: m.id,
     object: "model" as const,
     created: 0,
@@ -162,4 +241,6 @@ export async function listModels(ctx: UpstreamCtx = {}) {
     provider: m.provider,
     ...(m.context_window ? { context_window: m.context_window } : {}),
   }))
+  if (!opts.debug) return { data }
+  return { data, _debug: { usedFallback, count: data.length, probes } }
 }

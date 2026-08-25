@@ -36,8 +36,9 @@ export function createApp() {
 
   // ----- authenticated routes -----
   app.get("/v1/models", bearerAuth, (req, res, next) => {
-    listModels({ oidcToken: readOidcToken(req) })
-      .then((data) => res.json({ object: "list", data }))
+    const debug = req.query.debug === "1" || req.query.debug === "true"
+    listModels({ oidcToken: readOidcToken(req) }, { debug })
+      .then((r) => res.json({ object: "list", data: r.data, ...(r._debug ? { _debug: r._debug } : {}) }))
       .catch(next)
   })
 
