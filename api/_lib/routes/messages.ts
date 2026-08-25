@@ -87,11 +87,9 @@ async function forwardAnthropicMessages(
   })
 
   if (!upstreamRes.ok || !upstreamRes.body) {
-    const { status, raw, json } = await readUpstreamError(upstreamRes)
+    const { status, raw, body } = await readUpstreamError(upstreamRes)
     logger.warn({ status, raw, origin: cfg.origin }, "anthropic-format upstream error")
-    return res
-      .status(status)
-      .json(json ?? { error: { message: raw || "upstream error", type: "upstream_error" } })
+    return res.status(status).json(body)
   }
 
   if (wantStream) {
@@ -136,11 +134,9 @@ async function forwardOpenAIAsAnthropic(
   })
 
   if (!upstreamRes.ok || !upstreamRes.body) {
-    const { status, raw, json } = await readUpstreamError(upstreamRes)
+    const { status, raw, body } = await readUpstreamError(upstreamRes)
     logger.warn({ status, raw }, "openai upstream error (messages conversion)")
-    return res
-      .status(status)
-      .json(json ?? { error: { message: raw || "upstream error", type: "upstream_error" } })
+    return res.status(status).json(body)
   }
 
   if (wantStream) {

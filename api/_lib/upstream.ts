@@ -161,14 +161,36 @@ export function sanitizeAnthropicBody<T extends Record<string, unknown>>(body: T
   return out ?? body
 }
 
+/** Pull just message/type/code out of whatever error shape the upstream sent,
+ * dropping every other field (user_id, request_id, provider, org, …) so no
+ * channel/account metadata is forwarded. The message is URL/host-redacted. */
+function buildErrorBody(json: unknown, raw: string): { error: { message: string; type: string; code?: unknown } } {
+  const root = (json ?? {}) as Record<string, unknown>
+  const inner = (root.error && typeof root.error === "object" ? (root.error as Record<string, unknown>) : root) as Record<
+    string,
+    unknown
+  >
+  const rawMessage =
+    (typeof inner.message === "string" && inner.message) ||
+    (typeof root.message === "string" && root.message) ||
+    raw ||
+    "upstream error"
+  const type = (typeof inner.type === "string" && inner.type) || (typeof root.type === "string" && root.type) || "upstream_error"
+  const code = inner.code ?? root.code
+  const error: { message: string; type: string; code?: unknown } = { message: redactUrls(String(rawMessage)), type: String(type) }
+  if (code !== undefined) error.code = code
+  return { error }
+}
+
 /**
- * Read an upstream error response safely (text first, then optional JSON parse).
- * URLs/hosts are redacted from both `raw` and `json` so forwarding an upstream
- * error to the client never leaks the channel/endpoint.
+ * Read an upstream error response safely (text first, then optional JSON parse)
+ * and return a sanitized `body` safe to forward: only message/type/code, with
+ * URLs/hosts redacted from the message. `raw` is kept (also redacted) for
+ * server-side logging only — do NOT send it to the client.
  */
 export async function readUpstreamError(
   response: Response,
-): Promise<{ status: number; raw: string; json: unknown }> {
+): Promise<{ status: number; raw: string; body: { error: { message: string; type: string; code?: unknown } } }> {
   let raw = ""
   try {
     raw = await response.text()
@@ -183,5 +205,5 @@ export async function readUpstreamError(
       json = undefined
     }
   }
-  return { status: response.status, raw: redactUrls(raw), json: json === undefined ? undefined : redactDeep(json) }
+  return { status: response.status, raw: redactUrls(raw), body: buildErrorBody(json, raw) }
 }
