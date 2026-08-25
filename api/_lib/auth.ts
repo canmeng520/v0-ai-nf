@@ -1,27 +1,37 @@
 import type { Request, Response, NextFunction } from "express"
 
-export function bearerAuth(req: Request, res: Response, next: NextFunction) {
+/**
+ * Transport-agnostic auth check. `getHeader` returns a request header by
+ * (case-insensitive) name. Shared by the Express middleware and the Netlify
+ * Function so the token rules live in exactly one place.
+ */
+export function isAuthorized(getHeader: (name: string) => string | undefined): boolean {
   const expected = process.env.PROXY_API_KEY ?? "123"
 
   let token: string | undefined
-  const auth = req.header("authorization")
+  const auth = getHeader("authorization")
   if (auth) {
     const m = /^Bearer\s+(.+)$/i.exec(auth.trim())
     if (m) token = m[1]
   }
   if (!token) {
-    const xKey = req.header("x-api-key")
+    const xKey = getHeader("x-api-key")
     if (xKey) token = xKey
   }
+  return Boolean(token && token === expected)
+}
 
-  if (!token || token !== expected) {
-    return res.status(401).json({
-      error: {
-        message: "Invalid or missing API key. Send 'Authorization: Bearer <PROXY_API_KEY>' or 'x-api-key' header.",
-        type: "authentication_error",
-        code: "invalid_api_key",
-      },
-    })
+export const UNAUTHORIZED_BODY = {
+  error: {
+    message: "Invalid or missing API key. Send 'Authorization: Bearer <PROXY_API_KEY>' or 'x-api-key' header.",
+    type: "authentication_error",
+    code: "invalid_api_key",
+  },
+}
+
+export function bearerAuth(req: Request, res: Response, next: NextFunction) {
+  if (!isAuthorized((name) => req.header(name) ?? undefined)) {
+    return res.status(401).json(UNAUTHORIZED_BODY)
   }
   return next()
 }

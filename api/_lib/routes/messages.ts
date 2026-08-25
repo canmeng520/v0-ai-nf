@@ -5,9 +5,10 @@ import {
   getAnthropicConfig,
   readOidcToken,
   readUpstreamError,
+  sanitizeAnthropicBody,
   type UpstreamConfig,
 } from "../upstream.js"
-import { setSseHeaders, startKeepalive } from "../sse.js"
+import { setSseHeaders, startKeepalive, safeCancel } from "../sse.js"
 import { anthropicToOpenaiRequest, openaiResponseToAnthropic } from "../convert.js"
 import { pipeOpenaiStreamToAnthropic } from "../stream-convert.js"
 import { logger } from "../logger.js"
@@ -65,7 +66,7 @@ async function forwardAnthropicMessages(
   cfg: UpstreamConfig,
   modelProvider: "openai" | "anthropic",
 ) {
-  const outBody: AnthropicMessagesRequest = { ...body }
+  const outBody: AnthropicMessagesRequest = sanitizeAnthropicBody({ ...body }, cfg)
   if (cfg.gateway) {
     outBody.model = `${modelProvider}/${body.model}`
   }
@@ -97,13 +98,7 @@ async function forwardAnthropicMessages(
     setSseHeaders(res)
     startKeepalive(res)
     const reader = upstreamRes.body.getReader()
-    res.on("close", () => {
-      try {
-        reader.cancel()
-      } catch {
-        /* ignore */
-      }
-    })
+    res.on("close", () => safeCancel(reader))
     try {
       while (true) {
         const { value, done } = await reader.read()
@@ -151,13 +146,7 @@ async function forwardOpenAIAsAnthropic(
   if (wantStream) {
     setSseHeaders(res)
     startKeepalive(res)
-    res.on("close", () => {
-      try {
-        upstreamRes.body?.cancel()
-      } catch {
-        /* ignore */
-      }
-    })
+    res.on("close", () => safeCancel(upstreamRes.body))
     await pipeOpenaiStreamToAnthropic(upstreamRes.body, res, body.model)
     return
   }

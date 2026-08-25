@@ -88,4 +88,8 @@ export interface AnthropicMessagesRequest {
   tool_choice?: { type: "auto" | "any" | "tool" | "none"; name?: string }
   thinking?: { type: "enabled"; budget_tokens: number } | { type: "disabled" }
   metadata?: { user_id?: string }
+  /** Anthropic beta context-editing config. Native Anthropic accepts it; strict
+   * non-native upstreams reject it as an unknown field, so it is stripped for
+   * those. See `sanitizeAnthropicBody`. */
+  context_management?: unknown
 }

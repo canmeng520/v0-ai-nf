@@ -1,0 +1,21 @@
+# Netlify deployment for the AI Proxy Gateway.
+#
+# - The docs site (Vite + React) builds to apps/web/dist and is published as the
+#   site root, so "/" shows the documentation instead of Netlify's default 404.
+# - All gateway traffic (/v1/*, /healthz, /api/healthz) is served by the
+#   netlify/functions/gateway function, which binds to those paths via its own
+#   `config.path` export — no rewrites needed here.
+# - The Express deployment (local + Vercel) is untouched; both share api/_lib.
+
+[build]
+  command = "pnpm install --no-frozen-lockfile && pnpm --filter @ai-proxy/web build"
+  publish = "apps/web/dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  # pino uses dynamic requires that don't bundle cleanly; let the runtime load it.
+  external_node_modules = ["pino"]

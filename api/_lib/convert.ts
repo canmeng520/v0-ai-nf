@@ -16,6 +16,23 @@ function makeId(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 12)}${Date.now().toString(36)}`
 }
 
+/**
+ * gpt-5 and the o-series reasoning models reject the legacy `max_tokens` field
+ * on Chat Completions — they require `max_completion_tokens`. A leading
+ * `provider/` gateway prefix (e.g. `openai/gpt-5`) is tolerated.
+ */
+export function isReasoningModel(model: string): boolean {
+  const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model
+  return /^(gpt-5|o[0-9])/i.test(bare)
+}
+
+/** Set the correct max-output-tokens field for the target OpenAI model. */
+export function applyMaxTokens(out: OpenAIChatRequest, model: string, value: number | undefined): void {
+  if (value === undefined) return
+  if (isReasoningModel(model)) out.max_completion_tokens = value
+  else out.max_tokens = value
+}
+
 function dataUrlToAnthropicImage(url: string): AnthropicImageBlock {
   const m = /^data:([^;]+);base64,(.+)$/.exec(url)
   if (m) {
@@ -223,8 +240,8 @@ export function anthropicToOpenaiRequest(req: AnthropicMessagesRequest): OpenAIC
   const out: OpenAIChatRequest = {
     model: req.model,
     messages,
-    max_tokens: req.max_tokens,
   }
+  applyMaxTokens(out, req.model, req.max_tokens)
   if (req.temperature !== undefined) out.temperature = req.temperature
   if (req.top_p !== undefined) out.top_p = req.top_p
   if (req.stream !== undefined) out.stream = req.stream

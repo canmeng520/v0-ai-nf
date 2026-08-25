@@ -3,6 +3,7 @@ import cors from "cors"
 import { logger } from "./logger.js"
 import { bearerAuth } from "./auth.js"
 import { listModels } from "./models.js"
+import { buildHealth } from "./health.js"
 import { handleChatCompletions } from "./routes/chat-completions.js"
 import { handleMessages } from "./routes/messages.js"
 import { readOidcToken } from "./upstream.js"
@@ -30,25 +31,14 @@ export function createApp() {
 
   // ----- public health check (also reachable as /api/healthz via rewrite) -----
   app.get(["/api/healthz", "/healthz"], (req, res) => {
-    const hasOpenAI = Boolean(process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY)
-    const hasAnthropic = Boolean(process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY)
-    const hasGatewayKey = Boolean(process.env.AI_GATEWAY_API_KEY)
-    const hasOidcEnv = Boolean(process.env.VERCEL_OIDC_TOKEN)
-    const hasOidcHeader = Boolean(readOidcToken(req))
-    const hasGateway = hasGatewayKey || hasOidcEnv || hasOidcHeader
-    res.json({
-      status: "ok",
-      upstream: {
-        openai: hasOpenAI || hasGateway,
-        anthropic: hasAnthropic || hasGateway,
-      },
-      gateway: { key: hasGatewayKey, oidcEnv: hasOidcEnv, oidcHeader: hasOidcHeader },
-    })
+    res.json(buildHealth({ oidcToken: readOidcToken(req) }))
   })
 
   // ----- authenticated routes -----
-  app.get("/v1/models", bearerAuth, (_req, res) => {
-    res.json({ object: "list", data: listModels() })
+  app.get("/v1/models", bearerAuth, (req, res, next) => {
+    listModels({ oidcToken: readOidcToken(req) })
+      .then((data) => res.json({ object: "list", data }))
+      .catch(next)
   })
 
   app.post("/v1/chat/completions", bearerAuth, (req, res, next) => {

@@ -46,6 +46,28 @@ export function writeSseDone(res: Response) {
 }
 
 /**
+ * Cancel an upstream stream (or its reader) without ever surfacing an error.
+ * `cancel()` on a stream whose reader is already locked (our SSE parser owns it)
+ * throws synchronously on some engines and returns a REJECTED promise on others;
+ * both are swallowed here so a client disconnect can't produce an unhandled
+ * rejection that aborts the response.
+ */
+export function safeCancel(
+  target: { cancel(reason?: unknown): Promise<void> } | null | undefined,
+): void {
+  try {
+    const p = target?.cancel?.()
+    if (p && typeof (p as Promise<void>).then === "function") {
+      ;(p as Promise<void>).catch(() => {
+        /* ignore */
+      })
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
  * Generic line-delimited SSE parser. Yields { event?, data } objects.
  * Multiple `data:` lines are joined with `\n`. Empty lines flush the buffer.
  */

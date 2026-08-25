@@ -12,5 +12,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["api/**/*.ts", "dev-server.ts"]
+  "include": ["api/**/*.ts", "dev-server.ts", "netlify/**/*.mts"]
 }

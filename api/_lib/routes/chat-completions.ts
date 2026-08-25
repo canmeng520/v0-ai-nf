@@ -7,8 +7,8 @@ import {
   readUpstreamError,
   type UpstreamConfig,
 } from "../upstream.js"
-import { setSseHeaders, startKeepalive } from "../sse.js"
-import { openaiToAnthropicRequest, anthropicResponseToOpenai } from "../convert.js"
+import { setSseHeaders, startKeepalive, safeCancel } from "../sse.js"
+import { openaiToAnthropicRequest, anthropicResponseToOpenai, isReasoningModel } from "../convert.js"
 import { pipeAnthropicStreamToOpenai } from "../stream-convert.js"
 import { logger } from "../logger.js"
 import type { OpenAIChatRequest } from "../types.js"
@@ -64,6 +64,12 @@ async function forwardOpenAIChat(
   modelProvider: "openai" | "anthropic",
 ) {
   const outBody: OpenAIChatRequest = { ...body }
+  // gpt-5 / o-series reject `max_tokens`; translate a client-sent value so plain
+  // passthrough requests don't 400 on those models.
+  if (isReasoningModel(body.model) && outBody.max_tokens != null && outBody.max_completion_tokens == null) {
+    outBody.max_completion_tokens = outBody.max_tokens
+    delete outBody.max_tokens
+  }
   if (cfg.gateway) {
     outBody.model = `${modelProvider}/${body.model}`
   }
@@ -89,13 +95,7 @@ async function forwardOpenAIChat(
     setSseHeaders(res)
     startKeepalive(res)
     const reader = upstreamRes.body.getReader()
-    res.on("close", () => {
-      try {
-        reader.cancel()
-      } catch {
-        /* ignore */
-      }
-    })
+    res.on("close", () => safeCancel(reader))
     try {
       while (true) {
         const { value, done } = await reader.read()
@@ -145,13 +145,7 @@ async function forwardAnthropicAsOpenAI(
     setSseHeaders(res)
     startKeepalive(res)
     const reader = upstreamRes.body
-    res.on("close", () => {
-      try {
-        upstreamRes.body?.cancel()
-      } catch {
-        /* ignore */
-      }
-    })
+    res.on("close", () => safeCancel(upstreamRes.body))
     await pipeAnthropicStreamToOpenai(reader, res, body.model)
     return
   }
