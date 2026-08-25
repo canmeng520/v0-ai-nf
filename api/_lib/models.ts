@@ -201,10 +201,11 @@ export async function fetchUpstreamModels(
     tasks.push(probeModels(openaiCfg, { authorization: `Bearer ${openaiCfg.apiKey}` }, "openai"))
   }
 
-  // Skip the Anthropic probe when it resolves to the same unified gateway the
-  // OpenAI probe already covers (avoids duplicate work + double listings).
-  const sameGateway = openaiCfg.gateway && anthropicCfg.gateway && openaiCfg.apiKey === anthropicCfg.apiKey
-  if (anthropicCfg.apiKey && !sameGateway) {
+  // Skip the Anthropic probe when it resolves to the same endpoint the OpenAI
+  // probe already covers — e.g. the Netlify AI Gateway exposes one unified
+  // `/v1/models` for every provider, so a second call just repeats it.
+  const sameEndpoint = Boolean(openaiCfg.apiKey) && anthropicCfg.baseUrl === openaiCfg.baseUrl
+  if (anthropicCfg.apiKey && !sameEndpoint) {
     const headers: Record<string, string> = { "anthropic-version": "2023-06-01" }
     if (anthropicCfg.gateway) headers.authorization = `Bearer ${anthropicCfg.apiKey}`
     else headers["x-api-key"] = anthropicCfg.apiKey
