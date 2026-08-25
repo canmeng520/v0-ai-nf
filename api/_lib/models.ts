@@ -142,10 +142,15 @@ interface Source {
   headers: Record<string, string>
   /** Candidate list paths to try in order; first non-empty wins. */
   paths: string[]
+  /** Absolute list URLs to use instead of `baseUrl + paths` (e.g. OpenRouter's
+   * public catalogue, since the gateway itself can't enumerate it). */
+  listUrls?: string[]
   /** Display provider for ids from this source (overridden by a `vendor/` prefix). */
   provider: string
   /** Keep the full `vendor/model` id (OpenRouter routes by it); default strips it. */
   keepPrefix?: boolean
+  /** Vendors to skip (already covered by a direct source), by leading id segment. */
+  skipVendors?: string[]
 }
 
 /**
@@ -250,17 +255,21 @@ function buildSources(ctx: UpstreamCtx): Source[] {
     })
   }
 
-  // OpenRouter — routes by full `vendor/model` id, so keep the prefix.
+  // OpenRouter — the gateway can't enumerate it, so pull OpenRouter's own public
+  // catalogue, filtered to the Zero-Data-Retention subset Netlify actually routes
+  // to. Ids keep their `vendor/model` form (the gateway routes by it). Skip
+  // vendors already served directly to avoid near-duplicate listings.
   const orKey = process.env.OPENROUTER_API_KEY
-  const orBase = process.env.OPENROUTER_BASE_URL
-  if (orKey && orBase) {
+  if (orKey) {
     sources.push({
       name: "openrouter",
-      baseUrl: orBase,
+      baseUrl: "https://openrouter.ai",
       headers: { authorization: `Bearer ${orKey}` },
-      paths: candidatePaths(orBase, "openrouter"),
+      paths: [],
+      listUrls: ["https://openrouter.ai/api/v1/models?zdr=true"],
       provider: "openrouter",
       keepPrefix: true,
+      skipVendors: ["openai", "anthropic", "google", "google-vertex"],
     })
   }
 
@@ -284,7 +293,7 @@ export async function fetchUpstreamModels(
   const perSource = await Promise.all(
     sources.map(async (src) => {
       const diags: ProbeDiag[] = []
-      for (const url of src.paths) {
+      for (const url of src.listUrls ?? src.paths) {
         if (probedUrls.has(url)) continue
         probedUrls.add(url)
         const { ids, diag } = await probeUrl(src.name, url, src.headers)
@@ -301,11 +310,14 @@ export async function fetchUpstreamModels(
   for (const { src, ids, diags } of perSource) {
     probes.push(...diags)
     for (const raw of ids) {
+      const vendor = raw.includes("/") ? raw.slice(0, raw.indexOf("/")).toLowerCase() : ""
+      if (src.skipVendors && vendor && src.skipVendors.includes(vendor)) continue
       const stripped = stripProviderPrefix(raw)
       const id = src.keepPrefix ? raw : stripped.id
       if (seen.has(id)) continue
       seen.add(id)
-      const provider = stripped.provider ?? src.provider
+      // For kept-prefix ids (OpenRouter) the vendor segment is the truest provider label.
+      const provider = src.keepPrefix && vendor ? vendor : (stripped.provider ?? src.provider)
       models.push({ id, provider, context_window: FALLBACK_MAP.get(id)?.context_window ?? 0 })
     }
   }
