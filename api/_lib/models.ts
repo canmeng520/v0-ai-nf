@@ -1,11 +1,12 @@
-import { getOpenAIConfig, getAnthropicConfig, type UpstreamConfig, type UpstreamCtx } from "./upstream.js"
-import { logger } from "./logger.js"
+import { getOpenAIConfig, getAnthropicConfig, type UpstreamCtx } from "./upstream.js"
 
 export type Provider = "openai" | "anthropic"
 
 export interface ModelInfo {
+  // Display provider is a free string (openai / anthropic / google / openrouter / …);
+  // routing still uses the openai|anthropic `Provider` via getProvider().
   id: string
-  provider: Provider
+  provider: string
   context_window: number
 }
 
@@ -50,7 +51,7 @@ const PROVIDER_PREFIXES: Record<string, Provider | undefined> = {
 export function getProvider(model: string): Provider {
   const clean = stripProviderPrefix(model).id
   const exact = FALLBACK_MAP.get(clean)
-  if (exact) return exact.provider
+  if (exact) return exact.provider === "anthropic" ? "anthropic" : "openai"
   // Fallback by prefix
   if (/^claude/i.test(clean)) return "anthropic"
   if (/^(gpt-|o\d|chatgpt)/i.test(clean)) return "openai"
@@ -72,13 +73,15 @@ function stripProviderPrefix(id: string): { id: string; provider?: Provider } {
 
 interface RawModel {
   id?: string
+  name?: string
   [k: string]: unknown
 }
 
 /** One attempted `/models` request — captured so `?debug=1` can explain a miss. */
 export interface ProbeDiag {
+  source: string
   url: string
-  auth: "bearer" | "x-api-key"
+  auth: string
   status: number | null
   ok: boolean
   count: number
@@ -86,7 +89,8 @@ export interface ProbeDiag {
   bodySnippet?: string
 }
 
-/** Extract model ids from whatever list shape an upstream returns. */
+/** Extract model ids from whatever list shape an upstream returns (OpenAI `data[]`,
+ * Anthropic `data[]`, Gemini `models[].name`, or a bare array). */
 function extractIds(json: unknown): string[] {
   const list: RawModel[] = Array.isArray(json)
     ? (json as RawModel[])
@@ -94,16 +98,40 @@ function extractIds(json: unknown): string[] {
         (json as { models?: RawModel[] })?.models ??
         [])
   if (!Array.isArray(list)) return []
-  return list.map((m) => (typeof m === "string" ? m : m.id)).filter((id): id is string => Boolean(id))
+  return list
+    .map((m) => {
+      if (typeof m === "string") return m
+      let id = m?.id ?? m?.name
+      if (typeof id !== "string") return undefined
+      if (id.startsWith("models/")) id = id.slice("models/".length) // Gemini: "models/gemini-.."
+      return id
+    })
+    .filter((id): id is string => Boolean(id))
 }
 
 /**
- * GET one candidate `/models` URL. Follows Anthropic-style cursor pagination
+ * A place to look for a model catalogue. Different providers expose it at
+ * different paths and want different auth, so each source spells that out.
+ */
+interface Source {
+  name: string
+  baseUrl: string
+  headers: Record<string, string>
+  /** Candidate list paths to try in order; first non-empty wins. */
+  paths: string[]
+  /** Display provider for ids from this source (overridden by a `vendor/` prefix). */
+  provider: string
+  /** Keep the full `vendor/model` id (OpenRouter routes by it); default strips it. */
+  keepPrefix?: boolean
+}
+
+/**
+ * GET one candidate URL. Follows Anthropic-style cursor pagination
  * (`has_more` + `last_id`) up to a few pages so large catalogues aren't truncated.
  */
-async function probeUrl(url: string, headers: Record<string, string>): Promise<{ ids: string[]; diag: ProbeDiag }> {
-  const auth: ProbeDiag["auth"] = headers.authorization ? "bearer" : "x-api-key"
-  const diag: ProbeDiag = { url, auth, status: null, ok: false, count: 0 }
+async function probeUrl(source: string, url: string, headers: Record<string, string>): Promise<{ ids: string[]; diag: ProbeDiag }> {
+  const auth = headers.authorization ? "bearer" : headers["x-api-key"] ? "x-api-key" : headers["x-goog-api-key"] ? "x-goog-api-key" : "none"
+  const diag: ProbeDiag = { source, url, auth, status: null, ok: false, count: 0 }
   const ids: string[] = []
   let cursor: string | null = null
   try {
@@ -149,91 +177,146 @@ async function probeUrl(url: string, headers: Record<string, string>): Promise<{
   return { ids, diag }
 }
 
-/**
- * Probe an upstream for its model list, trying the sensible candidate paths for
- * its shape (`/models` and `/v1/models`, with/without a `/v1` base suffix). The
- * first candidate that returns ids wins; all attempts are recorded for debug.
- */
-async function probeModels(
-  cfg: UpstreamConfig,
-  headers: Record<string, string>,
-  kind: "openai" | "anthropic",
-): Promise<{ ids: string[]; diags: ProbeDiag[] }> {
-  const base = cfg.baseUrl.replace(/\/+$/, "")
+/** Build the provider-specific list-endpoint candidates for a base URL. */
+function candidatePaths(baseUrl: string, kind: "openai" | "anthropic" | "gemini" | "openrouter"): string[] {
+  const base = baseUrl.replace(/\/+$/, "")
   const hasV1 = /\/v1$/.test(base)
-  const candidates =
-    kind === "anthropic"
-      ? [hasV1 ? `${base}/models` : `${base}/v1/models`, `${base}/models`]
-      : [hasV1 ? `${base}/models` : `${base}/v1/models`, `${base}/v1/models`, `${base}/models`]
+  if (kind === "gemini") return [`${base}/v1beta/models`, `${base}/v1/models`, `${base}/models`]
+  return hasV1 ? [`${base}/models`, `${base}/v1/models`] : [`${base}/v1/models`, `${base}/models`]
+}
 
-  const seen = new Set<string>()
-  const diags: ProbeDiag[] = []
-  for (const url of candidates) {
-    if (seen.has(url)) continue
-    seen.add(url)
-    const { ids, diag } = await probeUrl(url, headers)
-    diags.push(diag)
-    if (ids.length > 0) return { ids, diags }
+/** Assemble every model source from the resolved upstreams + injected env vars. */
+function buildSources(ctx: UpstreamCtx): Source[] {
+  const openaiCfg = getOpenAIConfig(ctx)
+  const anthropicCfg = getAnthropicConfig(ctx)
+  const sources: Source[] = []
+
+  if (openaiCfg.apiKey) {
+    sources.push({
+      name: "openai",
+      baseUrl: openaiCfg.baseUrl,
+      headers: { authorization: `Bearer ${openaiCfg.apiKey}` },
+      paths: candidatePaths(openaiCfg.baseUrl, "openai"),
+      provider: "openai",
+    })
   }
-  logger.warn({ origin: cfg.origin, diags }, "models probe found nothing")
-  return { ids: [], diags }
+
+  if (anthropicCfg.apiKey) {
+    const headers: Record<string, string> = { "anthropic-version": "2023-06-01" }
+    if (anthropicCfg.gateway) headers.authorization = `Bearer ${anthropicCfg.apiKey}`
+    else headers["x-api-key"] = anthropicCfg.apiKey
+    sources.push({
+      name: "anthropic",
+      baseUrl: anthropicCfg.baseUrl,
+      headers,
+      paths: candidatePaths(anthropicCfg.baseUrl, "anthropic"),
+      provider: "anthropic",
+    })
+  }
+
+  // Gemini — Netlify injects GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL.
+  const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY
+  const geminiBase = process.env.GOOGLE_GEMINI_BASE_URL ?? process.env.GOOGLE_VERTEX_BASE_URL
+  if (geminiKey && geminiBase) {
+    sources.push({
+      name: "gemini",
+      baseUrl: geminiBase,
+      headers: { "x-goog-api-key": geminiKey },
+      paths: candidatePaths(geminiBase, "gemini"),
+      provider: "google",
+    })
+  }
+
+  // OpenRouter — routes by full `vendor/model` id, so keep the prefix.
+  const orKey = process.env.OPENROUTER_API_KEY
+  const orBase = process.env.OPENROUTER_BASE_URL
+  if (orKey && orBase) {
+    sources.push({
+      name: "openrouter",
+      baseUrl: orBase,
+      headers: { authorization: `Bearer ${orKey}` },
+      paths: candidatePaths(orBase, "openrouter"),
+      provider: "openrouter",
+      keepPrefix: true,
+    })
+  }
+
+  return sources
 }
 
 /**
- * Pull the live model catalogue from whatever upstream(s) are configured:
- *   - OpenAI-format upstream → `GET {base}/models`
- *   - Anthropic upstream     → `GET {base}/v1/messages`-sibling `GET {base}/v1/models`
- *   - Unified gateway (Vercel) → the OpenAI-format probe already returns every
- *     provider's models as `provider/model`, so the Anthropic probe is skipped.
- *
- * Ids are de-duplicated and provider-prefixes stripped. Returns `[]` when nothing
- * could be fetched so the caller can fall back to the static list.
+ * Pull the live model catalogue from every configured upstream/provider
+ * (OpenAI, Anthropic, Gemini, OpenRouter). Probes run in parallel; within a
+ * source the first candidate path that returns ids wins. Duplicate list URLs
+ * are probed once. Ids are de-duplicated; `vendor/` prefixes are stripped for
+ * routing unless the source needs them. Returns `[]` when nothing responds so
+ * the caller can fall back to the static list.
  */
 export async function fetchUpstreamModels(
   ctx: UpstreamCtx = {},
 ): Promise<{ models: ModelInfo[]; probes: ProbeDiag[] }> {
-  const openaiCfg = getOpenAIConfig(ctx)
-  const anthropicCfg = getAnthropicConfig(ctx)
+  const sources = buildSources(ctx)
+  const probedUrls = new Set<string>()
 
-  const tasks: Promise<{ ids: string[]; diags: ProbeDiag[]; hint?: Provider }>[] = []
-
-  if (openaiCfg.apiKey) {
-    tasks.push(probeModels(openaiCfg, { authorization: `Bearer ${openaiCfg.apiKey}` }, "openai"))
-  }
-
-  // Skip the Anthropic probe when it resolves to the same endpoint the OpenAI
-  // probe already covers — e.g. the Netlify AI Gateway exposes one unified
-  // `/v1/models` for every provider, so a second call just repeats it.
-  const sameEndpoint = Boolean(openaiCfg.apiKey) && anthropicCfg.baseUrl === openaiCfg.baseUrl
-  if (anthropicCfg.apiKey && !sameEndpoint) {
-    const headers: Record<string, string> = { "anthropic-version": "2023-06-01" }
-    if (anthropicCfg.gateway) headers.authorization = `Bearer ${anthropicCfg.apiKey}`
-    else headers["x-api-key"] = anthropicCfg.apiKey
-    tasks.push(probeModels(anthropicCfg, headers, "anthropic").then((r) => ({ ...r, hint: "anthropic" as const })))
-  }
-
-  const results = await Promise.all(tasks)
+  const perSource = await Promise.all(
+    sources.map(async (src) => {
+      const diags: ProbeDiag[] = []
+      for (const url of src.paths) {
+        if (probedUrls.has(url)) continue
+        probedUrls.add(url)
+        const { ids, diag } = await probeUrl(src.name, url, src.headers)
+        diags.push(diag)
+        if (ids.length > 0) return { src, ids, diags }
+      }
+      return { src, ids: [] as string[], diags }
+    }),
+  )
 
   const seen = new Set<string>()
   const models: ModelInfo[] = []
   const probes: ProbeDiag[] = []
-  for (const { ids, diags, hint } of results) {
+  for (const { src, ids, diags } of perSource) {
     probes.push(...diags)
     for (const raw of ids) {
-      const { id, provider } = stripProviderPrefix(raw)
+      const stripped = stripProviderPrefix(raw)
+      const id = src.keepPrefix ? raw : stripped.id
       if (seen.has(id)) continue
       seen.add(id)
-      const resolved = provider ?? hint ?? getProvider(id)
-      models.push({ id, provider: resolved, context_window: FALLBACK_MAP.get(id)?.context_window ?? 0 })
+      const provider = stripped.provider ?? src.provider
+      models.push({ id, provider, context_window: FALLBACK_MAP.get(id)?.context_window ?? 0 })
     }
   }
   return { models, probes }
 }
 
+/** Which credential/base-URL env vars are present + the resolved bases (no secrets). */
+function envDiag(ctx: UpstreamCtx) {
+  const has = (n: string) => Boolean(process.env[n])
+  return {
+    resolvedOpenAIBase: getOpenAIConfig(ctx).baseUrl,
+    resolvedAnthropicBase: getAnthropicConfig(ctx).baseUrl,
+    geminiBase: process.env.GOOGLE_GEMINI_BASE_URL ?? process.env.GOOGLE_VERTEX_BASE_URL ?? null,
+    openrouterBase: process.env.OPENROUTER_BASE_URL ?? null,
+    netlifyGatewayBase: process.env.NETLIFY_AI_GATEWAY_BASE_URL ?? null,
+    keys: {
+      AI_INTEGRATIONS_OPENAI: has("AI_INTEGRATIONS_OPENAI_API_KEY"),
+      AI_INTEGRATIONS_ANTHROPIC: has("AI_INTEGRATIONS_ANTHROPIC_API_KEY"),
+      OPENAI_API_KEY: has("OPENAI_API_KEY"),
+      OPENAI_BASE_URL: has("OPENAI_BASE_URL"),
+      ANTHROPIC_API_KEY: has("ANTHROPIC_API_KEY"),
+      ANTHROPIC_BASE_URL: has("ANTHROPIC_BASE_URL"),
+      GEMINI_API_KEY: has("GEMINI_API_KEY") || has("GOOGLE_API_KEY"),
+      OPENROUTER_API_KEY: has("OPENROUTER_API_KEY"),
+      NETLIFY_AI_GATEWAY_KEY: has("NETLIFY_AI_GATEWAY_KEY"),
+    },
+  }
+}
+
 /**
- * OpenAI-compatible `/v1/models` payload, sourced live from the upstream. When
- * `debug` is set the payload carries a `_debug` block explaining every probe
- * attempt (URL, status, error) so an incomplete list can be diagnosed.
+ * OpenAI-compatible `/v1/models` payload, sourced live from every configured
+ * provider. When `debug` is set the payload carries a `_debug` block explaining
+ * every probe attempt (source, URL, status, error) plus which env vars are
+ * present, so an incomplete list can be diagnosed against the real upstream.
  */
 export async function listModels(ctx: UpstreamCtx = {}, opts: { debug?: boolean } = {}) {
   const { models: fetched, probes } = await fetchUpstreamModels(ctx)
@@ -248,5 +331,5 @@ export async function listModels(ctx: UpstreamCtx = {}, opts: { debug?: boolean 
     ...(m.context_window ? { context_window: m.context_window } : {}),
   }))
   if (!opts.debug) return { data }
-  return { data, _debug: { usedFallback, count: data.length, probes } }
+  return { data, _debug: { usedFallback, count: data.length, probes, env: envDiag(ctx) } }
 }
