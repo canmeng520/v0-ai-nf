@@ -5,6 +5,7 @@ import {
   getAnthropicConfig,
   readOidcToken,
   readUpstreamError,
+  fetchUpstream,
   type UpstreamConfig,
 } from "../upstream.js"
 import { setSseHeaders, startKeepalive, safeCancel } from "../sse.js"
@@ -74,7 +75,7 @@ async function forwardOpenAIChat(
     outBody.model = `${modelProvider}/${body.model}`
   }
   const url = `${cfg.baseUrl}/chat/completions`
-  const upstreamRes = await fetch(url, {
+  const upstreamRes = await fetchUpstream(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -121,7 +122,7 @@ async function forwardAnthropicAsOpenAI(
   const anthropicReq = openaiToAnthropicRequest(body)
   anthropicReq.stream = wantStream
   const url = `${cfg.baseUrl}/v1/messages`
-  const upstreamRes = await fetch(url, {
+  const upstreamRes = await fetchUpstream(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",

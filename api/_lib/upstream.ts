@@ -161,6 +161,42 @@ export function sanitizeAnthropicBody<T extends Record<string, unknown>>(body: T
   return out ?? body
 }
 
+/** Transient upstream statuses worth retrying before any bytes reach the client. */
+const RETRYABLE_STATUS = new Set([500, 502, 503, 504])
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * `fetch` for the initial upstream request with a small retry on TRANSIENT
+ * failures (network throw like "fetch failed", or a 5xx from the gateway) —
+ * these happen at the gateway→provider hop before any response is produced, so
+ * retrying is safe: no tokens were generated, nothing was streamed to the
+ * client. 4xx (bad model, auth, invalid request) is NOT retried. Only use this
+ * for the first request; never retry once a stream has started.
+ */
+export async function fetchUpstream(url: string, init: RequestInit, retries = 2): Promise<Response> {
+  let lastErr: unknown
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await fetch(url, init)
+      if (RETRYABLE_STATUS.has(res.status) && attempt < retries) {
+        await delay(300 * (attempt + 1))
+        continue
+      }
+      return res
+    } catch (err) {
+      lastErr = err
+      if (attempt < retries) {
+        await delay(300 * (attempt + 1))
+        continue
+      }
+      throw lastErr
+    }
+  }
+}
+
 /** Pull just message/type/code out of whatever error shape the upstream sent,
  * dropping every other field (user_id, request_id, provider, org, …) so no
  * channel/account metadata is forwarded. The message is URL/host-redacted. */

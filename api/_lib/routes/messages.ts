@@ -5,6 +5,7 @@ import {
   getAnthropicConfig,
   readOidcToken,
   readUpstreamError,
+  fetchUpstream,
   sanitizeAnthropicBody,
   type UpstreamConfig,
 } from "../upstream.js"
@@ -80,7 +81,7 @@ async function forwardAnthropicMessages(
   } else {
     headers["x-api-key"] = cfg.apiKey
   }
-  const upstreamRes = await fetch(url, {
+  const upstreamRes = await fetchUpstream(url, {
     method: "POST",
     headers,
     body: JSON.stringify(outBody),
@@ -124,7 +125,7 @@ async function forwardOpenAIAsAnthropic(
   const openaiReq = anthropicToOpenaiRequest(body)
   openaiReq.stream = wantStream
   const url = `${cfg.baseUrl}/chat/completions`
-  const upstreamRes = await fetch(url, {
+  const upstreamRes = await fetchUpstream(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
