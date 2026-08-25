@@ -30,6 +30,29 @@ export const FALLBACK_MODELS: ModelInfo[] = [
 
 const FALLBACK_MAP = new Map(FALLBACK_MODELS.map((m) => [m.id, m]))
 
+/**
+ * Claude models the Netlify AI Gateway serves directly but does NOT expose via
+ * any list endpoint (`/v1/models` there returns only the OpenAI catalogue). We
+ * add these when an Anthropic upstream is configured on Netlify yet the live
+ * probe returns no Claude ids. Source: Netlify AI Gateway "models served
+ * directly" list — update when Netlify adds/removes Claude models.
+ */
+const NETLIFY_DIRECT_ANTHROPIC = [
+  "claude-fable-5",
+  "claude-haiku-4-5",
+  "claude-haiku-4-5-20251001",
+  "claude-opus-4-5",
+  "claude-opus-4-5-20251101",
+  "claude-opus-4-6",
+  "claude-opus-4-7",
+  "claude-opus-4-8",
+  "claude-opus-5",
+  "claude-sonnet-4-5",
+  "claude-sonnet-4-5-20250929",
+  "claude-sonnet-4-6",
+  "claude-sonnet-5",
+]
+
 /** Known gateway/provider path prefixes emitted by unified gateways (e.g. Vercel
  * returns `anthropic/claude-...`). We strip these so clients get clean ids that
  * route correctly back through this proxy. */
@@ -254,7 +277,7 @@ function buildSources(ctx: UpstreamCtx): Source[] {
  */
 export async function fetchUpstreamModels(
   ctx: UpstreamCtx = {},
-): Promise<{ models: ModelInfo[]; probes: ProbeDiag[] }> {
+): Promise<{ models: ModelInfo[]; probes: ProbeDiag[]; supplementedAnthropic: number }> {
   const sources = buildSources(ctx)
   const probedUrls = new Set<string>()
 
@@ -286,7 +309,25 @@ export async function fetchUpstreamModels(
       models.push({ id, provider, context_window: FALLBACK_MAP.get(id)?.context_window ?? 0 })
     }
   }
-  return { models, probes }
+
+  // The Netlify AI Gateway serves Claude but exposes no Claude list endpoint, so
+  // supplement from the curated set when an Anthropic upstream is configured yet
+  // nothing Claude came back live.
+  const hasAnthropicSource = sources.some((s) => s.name === "anthropic")
+  const anthropicLive = models.some((m) => m.provider === "anthropic")
+  const isNetlifyGateway =
+    Boolean(process.env.NETLIFY_AI_GATEWAY_KEY) || sources.some((s) => s.baseUrl.includes("/.netlify/ai"))
+  let supplementedAnthropic = 0
+  if (hasAnthropicSource && !anthropicLive && isNetlifyGateway) {
+    for (const id of NETLIFY_DIRECT_ANTHROPIC) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      models.push({ id, provider: "anthropic", context_window: FALLBACK_MAP.get(id)?.context_window ?? 200_000 })
+      supplementedAnthropic++
+    }
+  }
+
+  return { models, probes, supplementedAnthropic }
 }
 
 /** Which credential/base-URL env vars are present + the resolved bases (no secrets). */
@@ -319,7 +360,7 @@ function envDiag(ctx: UpstreamCtx) {
  * present, so an incomplete list can be diagnosed against the real upstream.
  */
 export async function listModels(ctx: UpstreamCtx = {}, opts: { debug?: boolean } = {}) {
-  const { models: fetched, probes } = await fetchUpstreamModels(ctx)
+  const { models: fetched, probes, supplementedAnthropic } = await fetchUpstreamModels(ctx)
   const usedFallback = fetched.length === 0
   const models = usedFallback ? FALLBACK_MODELS : fetched
   const data = models.map((m) => ({
@@ -331,5 +372,5 @@ export async function listModels(ctx: UpstreamCtx = {}, opts: { debug?: boolean 
     ...(m.context_window ? { context_window: m.context_window } : {}),
   }))
   if (!opts.debug) return { data }
-  return { data, _debug: { usedFallback, count: data.length, probes, env: envDiag(ctx) } }
+  return { data, _debug: { usedFallback, count: data.length, supplementedAnthropic, probes, env: envDiag(ctx) } }
 }
