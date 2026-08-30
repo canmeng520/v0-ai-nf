@@ -162,19 +162,37 @@ export function sanitizeAnthropicBody<T extends Record<string, unknown>>(body: T
 }
 
 /** Transient upstream statuses worth retrying before any bytes reach the client. */
-const RETRYABLE_STATUS = new Set([500, 502, 503, 504])
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+/** Cap any single backoff so retries can't blow the serverless function's time limit. */
+const MAX_RETRY_WAIT_MS = 2000
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** Backoff for one attempt. For 429 honor `Retry-After` (secs or HTTP-date), capped. */
+function backoffMs(res: Response, attempt: number): number {
+  if (res.status === 429) {
+    const h = res.headers.get("retry-after")
+    if (h) {
+      const secs = Number(h)
+      if (Number.isFinite(secs)) return Math.min(Math.max(0, secs) * 1000, MAX_RETRY_WAIT_MS)
+      const when = Date.parse(h)
+      if (!Number.isNaN(when)) return Math.min(Math.max(0, when - Date.now()), MAX_RETRY_WAIT_MS)
+    }
+    return Math.min(500 * (attempt + 1), MAX_RETRY_WAIT_MS)
+  }
+  return Math.min(300 * (attempt + 1), MAX_RETRY_WAIT_MS)
+}
+
 /**
  * `fetch` for the initial upstream request with a small retry on TRANSIENT
- * failures (network throw like "fetch failed", or a 5xx from the gateway) —
+ * failures (network throw like "fetch failed", a 5xx, or a 429 rate-limit) —
  * these happen at the gateway→provider hop before any response is produced, so
  * retrying is safe: no tokens were generated, nothing was streamed to the
- * client. 4xx (bad model, auth, invalid request) is NOT retried. Only use this
- * for the first request; never retry once a stream has started.
+ * client. 429 honors `Retry-After` (bounded). 4xx other than 429 (bad model,
+ * auth, invalid request) is NOT retried. Only use this for the first request;
+ * never retry once a stream has started.
  */
 export async function fetchUpstream(url: string, init: RequestInit, retries = 2): Promise<Response> {
   let lastErr: unknown
@@ -182,7 +200,7 @@ export async function fetchUpstream(url: string, init: RequestInit, retries = 2)
     try {
       const res = await fetch(url, init)
       if (RETRYABLE_STATUS.has(res.status) && attempt < retries) {
-        await delay(300 * (attempt + 1))
+        await delay(backoffMs(res, attempt))
         continue
       }
       return res
