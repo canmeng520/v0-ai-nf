@@ -8,7 +8,8 @@ import {
   fetchUpstream,
   type UpstreamConfig,
 } from "../upstream.js"
-import { setSseHeaders, startKeepalive, safeCancel } from "../sse.js"
+import { safeCancel } from "../sse.js"
+import { acquireStreamingUpstream } from "../forward.js"
 import { openaiToAnthropicRequest, anthropicResponseToOpenai, isReasoningModel } from "../convert.js"
 import { pipeAnthropicStreamToOpenai } from "../stream-convert.js"
 import { logger } from "../logger.js"
@@ -75,25 +76,16 @@ async function forwardOpenAIChat(
     outBody.model = `${modelProvider}/${body.model}`
   }
   const url = `${cfg.baseUrl}/chat/completions`
-  const upstreamRes = await fetchUpstream(url, {
+  const init: RequestInit = {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${cfg.apiKey}`,
-    },
+    headers: { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}` },
     body: JSON.stringify(outBody),
-  })
-
-  if (!upstreamRes.ok || !upstreamRes.body) {
-    const { status, raw, body } = await readUpstreamError(upstreamRes)
-    logger.warn({ status, raw, origin: cfg.origin }, "openai-format upstream error")
-    return res.status(status).json(body)
   }
 
   if (wantStream) {
-    setSseHeaders(res)
-    startKeepalive(res)
-    const reader = upstreamRes.body.getReader()
+    const upstreamRes = await acquireStreamingUpstream(res, url, init)
+    if (!upstreamRes) return // client error forwarded, or SSE error already emitted
+    const reader = upstreamRes.body!.getReader()
     res.on("close", () => safeCancel(reader))
     try {
       while (true) {
@@ -109,6 +101,12 @@ async function forwardOpenAIChat(
     return
   }
 
+  const upstreamRes = await fetchUpstream(url, init)
+  if (!upstreamRes.ok || !upstreamRes.body) {
+    const { status, raw, body: errBody } = await readUpstreamError(upstreamRes)
+    logger.warn({ status, raw, origin: cfg.origin }, "openai-format upstream error")
+    return res.status(status).json(errBody)
+  }
   const json = await upstreamRes.json()
   return res.status(200).json(json)
 }
@@ -122,31 +120,26 @@ async function forwardAnthropicAsOpenAI(
   const anthropicReq = openaiToAnthropicRequest(body)
   anthropicReq.stream = wantStream
   const url = `${cfg.baseUrl}/v1/messages`
-  const upstreamRes = await fetchUpstream(url, {
+  const init: RequestInit = {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": cfg.apiKey,
-      "anthropic-version": "2023-06-01",
-    },
+    headers: { "content-type": "application/json", "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" },
     body: JSON.stringify(anthropicReq),
-  })
-
-  if (!upstreamRes.ok || !upstreamRes.body) {
-    const { status, raw, body } = await readUpstreamError(upstreamRes)
-    logger.warn({ status, raw }, "anthropic upstream error (chat conversion)")
-    return res.status(status).json(body)
   }
 
   if (wantStream) {
-    setSseHeaders(res)
-    startKeepalive(res)
-    const reader = upstreamRes.body
+    const upstreamRes = await acquireStreamingUpstream(res, url, init)
+    if (!upstreamRes) return
     res.on("close", () => safeCancel(upstreamRes.body))
-    await pipeAnthropicStreamToOpenai(reader, res, body.model)
+    await pipeAnthropicStreamToOpenai(upstreamRes.body!, res, body.model)
     return
   }
 
+  const upstreamRes = await fetchUpstream(url, init)
+  if (!upstreamRes.ok || !upstreamRes.body) {
+    const { status, raw, body: errBody } = await readUpstreamError(upstreamRes)
+    logger.warn({ status, raw }, "anthropic upstream error (chat conversion)")
+    return res.status(status).json(errBody)
+  }
   const upstreamJson = await upstreamRes.json()
   const converted = anthropicResponseToOpenai(upstreamJson as never)
   return res.status(200).json(converted)

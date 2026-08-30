@@ -9,7 +9,8 @@ import {
   sanitizeAnthropicBody,
   type UpstreamConfig,
 } from "../upstream.js"
-import { setSseHeaders, startKeepalive, safeCancel } from "../sse.js"
+import { safeCancel } from "../sse.js"
+import { acquireStreamingUpstream } from "../forward.js"
 import { anthropicToOpenaiRequest, openaiResponseToAnthropic } from "../convert.js"
 import { pipeOpenaiStreamToAnthropic } from "../stream-convert.js"
 import { logger } from "../logger.js"
@@ -81,22 +82,12 @@ async function forwardAnthropicMessages(
   } else {
     headers["x-api-key"] = cfg.apiKey
   }
-  const upstreamRes = await fetchUpstream(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(outBody),
-  })
-
-  if (!upstreamRes.ok || !upstreamRes.body) {
-    const { status, raw, body } = await readUpstreamError(upstreamRes)
-    logger.warn({ status, raw, origin: cfg.origin }, "anthropic-format upstream error")
-    return res.status(status).json(body)
-  }
+  const init: RequestInit = { method: "POST", headers, body: JSON.stringify(outBody) }
 
   if (wantStream) {
-    setSseHeaders(res)
-    startKeepalive(res)
-    const reader = upstreamRes.body.getReader()
+    const upstreamRes = await acquireStreamingUpstream(res, url, init)
+    if (!upstreamRes) return
+    const reader = upstreamRes.body!.getReader()
     res.on("close", () => safeCancel(reader))
     try {
       while (true) {
@@ -112,6 +103,12 @@ async function forwardAnthropicMessages(
     return
   }
 
+  const upstreamRes = await fetchUpstream(url, init)
+  if (!upstreamRes.ok || !upstreamRes.body) {
+    const { status, raw, body: errBody } = await readUpstreamError(upstreamRes)
+    logger.warn({ status, raw, origin: cfg.origin }, "anthropic-format upstream error")
+    return res.status(status).json(errBody)
+  }
   const json = await upstreamRes.json()
   return res.status(200).json(json)
 }
@@ -125,29 +122,26 @@ async function forwardOpenAIAsAnthropic(
   const openaiReq = anthropicToOpenaiRequest(body)
   openaiReq.stream = wantStream
   const url = `${cfg.baseUrl}/chat/completions`
-  const upstreamRes = await fetchUpstream(url, {
+  const init: RequestInit = {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${cfg.apiKey}`,
-    },
+    headers: { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}` },
     body: JSON.stringify(openaiReq),
-  })
-
-  if (!upstreamRes.ok || !upstreamRes.body) {
-    const { status, raw, body } = await readUpstreamError(upstreamRes)
-    logger.warn({ status, raw }, "openai upstream error (messages conversion)")
-    return res.status(status).json(body)
   }
 
   if (wantStream) {
-    setSseHeaders(res)
-    startKeepalive(res)
+    const upstreamRes = await acquireStreamingUpstream(res, url, init)
+    if (!upstreamRes) return
     res.on("close", () => safeCancel(upstreamRes.body))
-    await pipeOpenaiStreamToAnthropic(upstreamRes.body, res, body.model)
+    await pipeOpenaiStreamToAnthropic(upstreamRes.body!, res, body.model)
     return
   }
 
+  const upstreamRes = await fetchUpstream(url, init)
+  if (!upstreamRes.ok || !upstreamRes.body) {
+    const { status, raw, body: errBody } = await readUpstreamError(upstreamRes)
+    logger.warn({ status, raw }, "openai upstream error (messages conversion)")
+    return res.status(status).json(errBody)
+  }
   const upstreamJson = await upstreamRes.json()
   const converted = openaiResponseToAnthropic(upstreamJson as never)
   return res.status(200).json(converted)

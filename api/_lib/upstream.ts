@@ -192,6 +192,20 @@ function backoffMs(res: Response, attempt: number): number {
   return Math.min(300 * (attempt + 1) + jitter, MAX_RETRY_WAIT_MS)
 }
 
+/** Thrown when the request to the upstream itself never completed (network
+ * error / hang) after all retries — distinct from the upstream returning an
+ * error response. Lets the error handlers reply 502 with a clear, retryable
+ * message instead of a generic 500, and tells us the failing hop is
+ * us↔gateway (not gateway↔provider). */
+export class UpstreamUnreachableError extends Error {
+  readonly attempts: number
+  constructor(message: string, attempts: number) {
+    super(message)
+    this.name = "UpstreamUnreachableError"
+    this.attempts = attempts
+  }
+}
+
 /**
  * `fetch` for the initial upstream request with retry on TRANSIENT failures
  * (network throw like "fetch failed", a 5xx, a 429 rate-limit, or a pre-response
@@ -202,7 +216,7 @@ function backoffMs(res: Response, attempt: number): number {
  * other than 429 (bad model, auth, invalid request) is NOT retried. Only use
  * this for the first request; never retry once a stream has started.
  */
-export async function fetchUpstream(url: string, init: RequestInit, retries = 3): Promise<Response> {
+export async function fetchUpstream(url: string, init: RequestInit, retries = 4): Promise<Response> {
   let lastErr: unknown
   for (let attempt = 0; ; attempt++) {
     const ac = new AbortController()
@@ -224,8 +238,41 @@ export async function fetchUpstream(url: string, init: RequestInit, retries = 3)
         await delay(Math.min(300 * (attempt + 1) + Math.floor(Math.random() * 150), MAX_RETRY_WAIT_MS))
         continue
       }
-      throw lastErr
+      const reason = lastErr instanceof Error ? lastErr.message : String(lastErr)
+      throw new UpstreamUnreachableError(`upstream unreachable after ${retries + 1} attempts: ${redactUrls(reason)}`, retries + 1)
     }
+  }
+}
+
+/** Is this status one we treat as a transient, retryable upstream failure? */
+export function isRetryableStatus(status: number): boolean {
+  return RETRYABLE_STATUS.has(status)
+}
+
+/**
+ * Keep hitting the upstream until it yields a usable (ok + body) response, a
+ * NON-retryable status (e.g. 4xx — hand it back so the caller forwards it), or
+ * `deadlineMs` elapses. Never throws and never gives up early on transient
+ * failures — this is what lets a streaming caller ride out a multi-second
+ * gateway/provider outage behind a heartbeat instead of surfacing a 500.
+ * Returns the Response, or null if it kept failing transiently past the deadline.
+ */
+export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlineMs: number): Promise<Response | null> {
+  const start = Date.now()
+  for (let attempt = 0; ; attempt++) {
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), RESPONSE_TIMEOUT_MS)
+    try {
+      const res = await fetch(url, { ...init, signal: ac.signal })
+      clearTimeout(timer)
+      if (res.ok && res.body) return res
+      if (!RETRYABLE_STATUS.has(res.status)) return res // non-retryable (4xx) → let caller forward it
+      // retryable status → fall through to backoff
+    } catch {
+      clearTimeout(timer) // network throw / timeout → retry
+    }
+    if (Date.now() - start >= deadlineMs) return null
+    await delay(Math.min(700 * (attempt + 1) + Math.floor(Math.random() * 400), 2500))
   }
 }
 

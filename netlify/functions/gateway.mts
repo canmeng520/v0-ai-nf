@@ -13,6 +13,7 @@ import { listModels, debugEnabled } from "../../api/_lib/models.js"
 import { handleChatCompletions } from "../../api/_lib/routes/chat-completions.js"
 import { handleMessages } from "../../api/_lib/routes/messages.js"
 import { redactErrorMessage } from "../../api/_lib/redact.js"
+import { UpstreamUnreachableError } from "../../api/_lib/upstream.js"
 
 export default async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url)
@@ -43,9 +44,13 @@ export default async function handler(request: Request): Promise<Response> {
   // as soon as headers commit — streaming handlers keep writing the body after.
   void dispatch(pathname, request.method, xreq, res).catch((err) => {
     if (!res.headersSent) {
-      res.status(500).json({
-        error: { message: err instanceof Error ? redactErrorMessage(err) : "internal server error", type: "internal_error" },
-      })
+      if (err instanceof UpstreamUnreachableError) {
+        res.status(502).json({ error: { message: redactErrorMessage(err), type: "upstream_unreachable", code: 502 } })
+      } else {
+        res.status(500).json({
+          error: { message: err instanceof Error ? redactErrorMessage(err) : "internal server error", type: "internal_error" },
+        })
+      }
     } else if (!res.writableEnded) {
       res.end()
     }

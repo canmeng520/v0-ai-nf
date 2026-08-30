@@ -6,7 +6,7 @@ import { listModels, debugEnabled } from "./models.js"
 import { buildHealth } from "./health.js"
 import { handleChatCompletions } from "./routes/chat-completions.js"
 import { handleMessages } from "./routes/messages.js"
-import { readOidcToken } from "./upstream.js"
+import { readOidcToken, UpstreamUnreachableError } from "./upstream.js"
 import { redactErrorMessage } from "./redact.js"
 
 export function createApp() {
@@ -62,6 +62,9 @@ export function createApp() {
     if (res.headersSent) {
       if (!res.writableEnded) res.end()
       return
+    }
+    if (err instanceof UpstreamUnreachableError) {
+      return res.status(502).json({ error: { message: redactErrorMessage(err), type: "upstream_unreachable", code: 502 } })
     }
     const message = err instanceof Error ? redactErrorMessage(err) : "internal server error"
     res.status(500).json({ error: { message, type: "internal_error" } })
