@@ -1,5 +1,11 @@
 import type { Response as ExpressResponse } from "express"
-import { fetchUpstream, fetchUpstreamUntil, readUpstreamError, isRetryableStatus } from "./upstream.js"
+import {
+  fetchUpstream,
+  fetchUpstreamUntil,
+  readUpstreamError,
+  isRetryableStatus,
+  UpstreamUnreachableError,
+} from "./upstream.js"
 import { setSseHeaders, startKeepalive, writeSseData, writeSseDone } from "./sse.js"
 
 /** How long a streaming request will keep retrying a transiently-failing upstream
@@ -8,6 +14,27 @@ import { setSseHeaders, startKeepalive, writeSseData, writeSseDone } from "./sse
 function streamDeadlineMs(): number {
   const v = Number(process.env.UPSTREAM_STREAM_RETRY_MS)
   return Number.isFinite(v) && v > 0 ? v : 45_000
+}
+
+/** How long a NON-streaming request rides out a transiently-failing upstream
+ * before returning 502. Bounded well under the serverless sync-timeout (default
+ * ~10s) since nothing can be sent to the client until the whole call returns.
+ * Override with UPSTREAM_NONSTREAM_RETRY_MS. */
+function nonStreamDeadlineMs(): number {
+  const v = Number(process.env.UPSTREAM_NONSTREAM_RETRY_MS)
+  return Number.isFinite(v) && v > 0 ? v : 7_000
+}
+
+/**
+ * Non-streaming upstream fetch that rides out transient "fetch failed"/5xx/429
+ * for up to nonStreamDeadlineMs before giving up. Returns a Response (ok, or a
+ * non-retryable 4xx to forward). Throws UpstreamUnreachableError → 502 when the
+ * upstream stays unreachable past the deadline.
+ */
+export async function acquireUpstream(url: string, init: RequestInit): Promise<Response> {
+  const res = await fetchUpstreamUntil(url, init, nonStreamDeadlineMs())
+  if (res) return res
+  throw new UpstreamUnreachableError("upstream unreachable: fetch failed (non-stream retries exhausted)", 0)
 }
 
 /**

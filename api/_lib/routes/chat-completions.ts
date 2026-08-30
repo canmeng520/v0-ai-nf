@@ -5,11 +5,10 @@ import {
   getAnthropicConfig,
   readOidcToken,
   readUpstreamError,
-  fetchUpstream,
   type UpstreamConfig,
 } from "../upstream.js"
 import { safeCancel } from "../sse.js"
-import { acquireStreamingUpstream } from "../forward.js"
+import { acquireStreamingUpstream, acquireUpstream } from "../forward.js"
 import { openaiToAnthropicRequest, anthropicResponseToOpenai, isReasoningModel } from "../convert.js"
 import { pipeAnthropicStreamToOpenai } from "../stream-convert.js"
 import { logger } from "../logger.js"
@@ -101,7 +100,7 @@ async function forwardOpenAIChat(
     return
   }
 
-  const upstreamRes = await fetchUpstream(url, init)
+  const upstreamRes = await acquireUpstream(url, init)
   if (!upstreamRes.ok || !upstreamRes.body) {
     const { status, raw, body: errBody } = await readUpstreamError(upstreamRes)
     logger.warn({ status, raw, origin: cfg.origin }, "openai-format upstream error")
@@ -134,7 +133,7 @@ async function forwardAnthropicAsOpenAI(
     return
   }
 
-  const upstreamRes = await fetchUpstream(url, init)
+  const upstreamRes = await acquireUpstream(url, init)
   if (!upstreamRes.ok || !upstreamRes.body) {
     const { status, raw, body: errBody } = await readUpstreamError(upstreamRes)
     logger.warn({ status, raw }, "anthropic upstream error (chat conversion)")
