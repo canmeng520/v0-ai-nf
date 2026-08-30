@@ -165,13 +165,20 @@ export function sanitizeAnthropicBody<T extends Record<string, unknown>>(body: T
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
 /** Cap any single backoff so retries can't blow the serverless function's time limit. */
 const MAX_RETRY_WAIT_MS = 2000
+/** Abort a request that hasn't produced RESPONSE HEADERS within this window and
+ * retry it — turns a hung gateway→provider connection into a fast retry instead
+ * of a request that hangs until the function times out. Cleared the moment
+ * headers arrive, so a legitimately slow stream/generation is never cut. */
+const RESPONSE_TIMEOUT_MS = 30_000
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** Backoff for one attempt. For 429 honor `Retry-After` (secs or HTTP-date), capped. */
+/** Backoff for one attempt (with jitter to de-sync concurrent retries). For 429
+ * honor `Retry-After` (secs or HTTP-date), capped. */
 function backoffMs(res: Response, attempt: number): number {
+  const jitter = Math.floor(Math.random() * 150)
   if (res.status === 429) {
     const h = res.headers.get("retry-after")
     if (h) {
@@ -180,34 +187,41 @@ function backoffMs(res: Response, attempt: number): number {
       const when = Date.parse(h)
       if (!Number.isNaN(when)) return Math.min(Math.max(0, when - Date.now()), MAX_RETRY_WAIT_MS)
     }
-    return Math.min(500 * (attempt + 1), MAX_RETRY_WAIT_MS)
+    return Math.min(500 * (attempt + 1) + jitter, MAX_RETRY_WAIT_MS)
   }
-  return Math.min(300 * (attempt + 1), MAX_RETRY_WAIT_MS)
+  return Math.min(300 * (attempt + 1) + jitter, MAX_RETRY_WAIT_MS)
 }
 
 /**
- * `fetch` for the initial upstream request with a small retry on TRANSIENT
- * failures (network throw like "fetch failed", a 5xx, or a 429 rate-limit) —
- * these happen at the gateway→provider hop before any response is produced, so
- * retrying is safe: no tokens were generated, nothing was streamed to the
- * client. 429 honors `Retry-After` (bounded). 4xx other than 429 (bad model,
- * auth, invalid request) is NOT retried. Only use this for the first request;
- * never retry once a stream has started.
+ * `fetch` for the initial upstream request with retry on TRANSIENT failures
+ * (network throw like "fetch failed", a 5xx, a 429 rate-limit, or a pre-response
+ * hang) — these happen at the gateway→provider hop before any response is
+ * produced, so retrying is safe: no tokens were generated, nothing was streamed
+ * to the client. Each attempt is aborted if no response headers arrive within
+ * RESPONSE_TIMEOUT_MS, then retried. 429 honors `Retry-After` (bounded). 4xx
+ * other than 429 (bad model, auth, invalid request) is NOT retried. Only use
+ * this for the first request; never retry once a stream has started.
  */
-export async function fetchUpstream(url: string, init: RequestInit, retries = 2): Promise<Response> {
+export async function fetchUpstream(url: string, init: RequestInit, retries = 3): Promise<Response> {
   let lastErr: unknown
   for (let attempt = 0; ; attempt++) {
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), RESPONSE_TIMEOUT_MS)
     try {
-      const res = await fetch(url, init)
+      const res = await fetch(url, { ...init, signal: ac.signal })
+      // Headers received — stop the timer so a slow stream/generation body is
+      // never cut, and hand the response to the caller.
+      clearTimeout(timer)
       if (RETRYABLE_STATUS.has(res.status) && attempt < retries) {
         await delay(backoffMs(res, attempt))
         continue
       }
       return res
     } catch (err) {
+      clearTimeout(timer)
       lastErr = err
       if (attempt < retries) {
-        await delay(300 * (attempt + 1))
+        await delay(Math.min(300 * (attempt + 1) + Math.floor(Math.random() * 150), MAX_RETRY_WAIT_MS))
         continue
       }
       throw lastErr
