@@ -37,9 +37,11 @@ function nonStreamDeadlineMs(): number {
  * upstream stays unreachable past the deadline.
  */
 export async function acquireUpstream(url: string, init: RequestInit): Promise<Response> {
+  const start = Date.now()
   const res = await fetchUpstreamUntil(url, init, nonStreamDeadlineMs())
   if (res) return res
-  throw new UpstreamUnreachableError("upstream unreachable: fetch failed (non-stream retries exhausted)", 0)
+  const secs = Math.round((Date.now() - start) / 1000)
+  throw new UpstreamUnreachableError(`upstream refused connection for ${secs}s (non-stream retries exhausted): fetch failed`, 0)
 }
 
 /**
