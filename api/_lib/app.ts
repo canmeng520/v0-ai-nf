@@ -8,6 +8,7 @@ import { handleChatCompletions } from "./routes/chat-completions.js"
 import { handleMessages } from "./routes/messages.js"
 import { readOidcToken, UpstreamUnreachableError } from "./upstream.js"
 import { redactErrorMessage } from "./redact.js"
+import { runDiag } from "./diag.js"
 
 export function createApp() {
   const app = express()
@@ -49,6 +50,13 @@ export function createApp() {
 
   app.post("/v1/messages", bearerAuth, (req, res, next) => {
     Promise.resolve(handleMessages(req, res)).catch(next)
+  })
+
+  // ----- on-demand upstream diagnostics (auth-gated; masks host) -----
+  app.get("/v1/diag", bearerAuth, (req, res, next) => {
+    runDiag({ oidcToken: readOidcToken(req) }, req.query as Record<string, string | string[] | undefined>)
+      .then((j) => res.json(j))
+      .catch(next)
   })
 
   // ----- 404 -----

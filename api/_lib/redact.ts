@@ -32,3 +32,19 @@ export function redactErrorMessage(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err)
   return redactUrls(msg)
 }
+
+/**
+ * Describe a thrown fetch/network error with its real cause code appended, e.g.
+ * `fetch failed [ECONNRESET]`. `fetch failed` is undici's generic wrapper; the
+ * actionable detail (connection reset / connect timeout / DNS) lives on
+ * `err.cause.code`. The message is URL/host-redacted.
+ */
+export function describeFetchError(err: unknown): string {
+  const e = err as { name?: string; message?: string; code?: string; cause?: { code?: string; message?: string } }
+  const base = redactUrls(String(e?.message ?? err ?? "error"))
+  const code = e?.cause?.code ?? e?.code
+  const causeMsg = !code && e?.cause?.message ? redactUrls(e.cause.message) : undefined
+  if (code) return `${base} [${code}]`
+  if (causeMsg && causeMsg !== base) return `${base} (${causeMsg})`
+  return base
+}

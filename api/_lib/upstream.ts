@@ -1,4 +1,14 @@
-import { redactUrls, redactDeep } from "./redact.js"
+import { redactUrls, redactDeep, describeFetchError } from "./redact.js"
+import { logger } from "./logger.js"
+
+/** Host for logging (server-side only; safe to include the real host). */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return "?"
+  }
+}
 
 const VERCEL_GATEWAY_BASE = "https://ai-gateway.vercel.sh"
 
@@ -217,16 +227,19 @@ export class UpstreamUnreachableError extends Error {
  * this for the first request; never retry once a stream has started.
  */
 export async function fetchUpstream(url: string, init: RequestInit, retries = 4): Promise<Response> {
+  const host = hostOf(url)
   let lastErr: unknown
   for (let attempt = 0; ; attempt++) {
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), RESPONSE_TIMEOUT_MS)
+    const t0 = Date.now()
     try {
       const res = await fetch(url, { ...init, signal: ac.signal })
       // Headers received — stop the timer so a slow stream/generation body is
       // never cut, and hand the response to the caller.
       clearTimeout(timer)
       if (RETRYABLE_STATUS.has(res.status) && attempt < retries) {
+        logger.warn({ host, status: res.status, attempt, ms: Date.now() - t0 }, "upstream retryable status")
         await delay(backoffMs(res, attempt))
         continue
       }
@@ -234,12 +247,15 @@ export async function fetchUpstream(url: string, init: RequestInit, retries = 4)
     } catch (err) {
       clearTimeout(timer)
       lastErr = err
+      logger.warn({ host, attempt, ms: Date.now() - t0, err: describeFetchError(err) }, "upstream attempt failed")
       if (attempt < retries) {
         await delay(Math.min(300 * (attempt + 1) + Math.floor(Math.random() * 150), MAX_RETRY_WAIT_MS))
         continue
       }
-      const reason = lastErr instanceof Error ? lastErr.message : String(lastErr)
-      throw new UpstreamUnreachableError(`upstream unreachable after ${retries + 1} attempts: ${redactUrls(reason)}`, retries + 1)
+      throw new UpstreamUnreachableError(
+        `upstream unreachable after ${retries + 1} attempts: ${describeFetchError(lastErr)}`,
+        retries + 1,
+      )
     }
   }
 }
@@ -249,29 +265,46 @@ export function isRetryableStatus(status: number): boolean {
   return RETRYABLE_STATUS.has(status)
 }
 
+export interface RideOutResult {
+  res: Response | null
+  attempts: number
+  elapsedMs: number
+  /** describeFetchError of the last failure (network throw or retryable status). */
+  lastError?: string
+}
+
 /**
  * Keep hitting the upstream until it yields a usable (ok + body) response, a
  * NON-retryable status (e.g. 4xx — hand it back so the caller forwards it), or
  * `deadlineMs` elapses. Never throws and never gives up early on transient
  * failures — this is what lets a streaming caller ride out a multi-second
  * gateway/provider outage behind a heartbeat instead of surfacing a 500.
- * Returns the Response, or null if it kept failing transiently past the deadline.
+ * Returns the Response in `res`, or `res: null` if it kept failing transiently
+ * past the deadline, along with attempt/elapsed/lastError diagnostics.
  */
-export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlineMs: number): Promise<Response | null> {
+export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlineMs: number): Promise<RideOutResult> {
+  const host = hostOf(url)
   const start = Date.now()
+  let lastError: string | undefined
+  let attempts = 0
   for (let attempt = 0; ; attempt++) {
+    attempts = attempt + 1
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), RESPONSE_TIMEOUT_MS)
+    const t0 = Date.now()
     try {
       const res = await fetch(url, { ...init, signal: ac.signal })
       clearTimeout(timer)
-      if (res.ok && res.body) return res
-      if (!RETRYABLE_STATUS.has(res.status)) return res // non-retryable (4xx) → let caller forward it
-      // retryable status → fall through to backoff
-    } catch {
-      clearTimeout(timer) // network throw / timeout → retry
+      if (res.ok && res.body) return { res, attempts, elapsedMs: Date.now() - start }
+      if (!RETRYABLE_STATUS.has(res.status)) return { res, attempts, elapsedMs: Date.now() - start } // 4xx → forward
+      lastError = `status ${res.status}`
+      logger.warn({ host, status: res.status, attempt, ms: Date.now() - t0 }, "upstream retryable status")
+    } catch (err) {
+      clearTimeout(timer)
+      lastError = describeFetchError(err)
+      logger.warn({ host, attempt, ms: Date.now() - t0, err: lastError }, "upstream attempt failed")
     }
-    if (Date.now() - start >= deadlineMs) return null
+    if (Date.now() - start >= deadlineMs) return { res: null, attempts, elapsedMs: Date.now() - start, lastError }
     await delay(Math.min(700 * (attempt + 1) + Math.floor(Math.random() * 400), 2500))
   }
 }

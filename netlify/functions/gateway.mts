@@ -14,6 +14,7 @@ import { handleChatCompletions } from "../../api/_lib/routes/chat-completions.js
 import { handleMessages } from "../../api/_lib/routes/messages.js"
 import { redactErrorMessage } from "../../api/_lib/redact.js"
 import { UpstreamUnreachableError } from "../../api/_lib/upstream.js"
+import { runDiag } from "../../api/_lib/diag.js"
 
 export default async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url)
@@ -75,6 +76,15 @@ export default async function handler(request: Request): Promise<Response> {
       return
     }
 
+    if (path === "/v1/diag" && method === "GET") {
+      if (!isAuthorized((n) => r.header(n) ?? undefined)) {
+        w.status(401).json(UNAUTHORIZED_BODY)
+        return
+      }
+      w.json(await runDiag({}, Object.fromEntries(url.searchParams)))
+      return
+    }
+
     if (path === "/v1/chat/completions" && method === "POST") {
       if (!isAuthorized((n) => r.header(n) ?? undefined)) {
         w.status(401).json(UNAUTHORIZED_BODY)
@@ -98,5 +108,5 @@ export default async function handler(request: Request): Promise<Response> {
 }
 
 export const config = {
-  path: ["/api/healthz", "/healthz", "/v1", "/v1/models", "/v1/chat/completions", "/v1/messages"],
+  path: ["/api/healthz", "/healthz", "/v1", "/v1/models", "/v1/diag", "/v1/chat/completions", "/v1/messages"],
 }

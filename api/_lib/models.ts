@@ -352,7 +352,7 @@ export function debugEnabled(): boolean {
 }
 
 /** Which credential/base-URL env vars are present + the resolved bases (no secrets). */
-function envDiag(ctx: UpstreamCtx) {
+export function envDiag(ctx: UpstreamCtx) {
   const has = (n: string) => Boolean(process.env[n])
   return {
     resolvedOpenAIBase: getOpenAIConfig(ctx).baseUrl,

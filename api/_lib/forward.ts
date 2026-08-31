@@ -37,11 +37,13 @@ function nonStreamDeadlineMs(): number {
  * upstream stays unreachable past the deadline.
  */
 export async function acquireUpstream(url: string, init: RequestInit): Promise<Response> {
-  const start = Date.now()
-  const res = await fetchUpstreamUntil(url, init, nonStreamDeadlineMs())
+  const { res, attempts, elapsedMs, lastError } = await fetchUpstreamUntil(url, init, nonStreamDeadlineMs())
   if (res) return res
-  const secs = Math.round((Date.now() - start) / 1000)
-  throw new UpstreamUnreachableError(`upstream refused connection for ${secs}s (non-stream retries exhausted): fetch failed`, 0)
+  const secs = Math.round(elapsedMs / 1000)
+  throw new UpstreamUnreachableError(
+    `upstream unreachable for ${secs}s / ${attempts} attempts (non-stream): ${lastError ?? "fetch failed"}`,
+    attempts,
+  )
 }
 
 /**
@@ -91,10 +93,10 @@ export async function acquireStreamingUpstream(
   // ---- phase 2: transient failure — open the stream + heartbeat, then ride it out ----
   setSseHeaders(res)
   startKeepalive(res, format)
-  const good = await fetchUpstreamUntil(url, init, streamDeadlineMs())
+  const { res: good, lastError } = await fetchUpstreamUntil(url, init, streamDeadlineMs())
   if (good && good.ok && good.body) return good
 
-  let message = "upstream temporarily unavailable, please retry"
+  let message = `upstream temporarily unavailable: ${lastError ?? "fetch failed"}`
   if (good) {
     const { body } = await readUpstreamError(good)
     message = body.error.message
