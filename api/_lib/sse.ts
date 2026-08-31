@@ -10,11 +10,26 @@ export function setSseHeaders(res: Response) {
   res.flushHeaders?.()
 }
 
-export function startKeepalive(res: Response, intervalMs = 5000) {
+/** Client-facing stream protocol — determines the keepalive shape. */
+export type StreamFormat = "openai" | "anthropic"
+
+/**
+ * Heartbeat sent while waiting for upstream data. It MUST be innocuous to the
+ * client's SSE parser. A bare `:` comment is fine for OpenAI clients, but strict
+ * Anthropic clients (e.g. new-api) mis-parse a comment line and try to JSON-decode
+ * "keepalive" → `invalid character 'k'`. Anthropic streams therefore get a real
+ * `ping` event instead. Anthropic's own API sends these, so every parser ignores it.
+ */
+function heartbeatPayload(format: StreamFormat): string {
+  return format === "anthropic" ? `event: ping\ndata: {"type": "ping"}\n\n` : `: keepalive\n\n`
+}
+
+export function startKeepalive(res: Response, format: StreamFormat = "openai", intervalMs = 5000) {
+  const payload = heartbeatPayload(format)
   const id = setInterval(() => {
     if (res.writableEnded) return
     try {
-      res.write(`: keepalive\n\n`)
+      res.write(payload)
     } catch {
       // ignore
     }

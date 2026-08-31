@@ -6,7 +6,7 @@ import {
   isRetryableStatus,
   UpstreamUnreachableError,
 } from "./upstream.js"
-import { setSseHeaders, startKeepalive, writeSseData, writeSseDone } from "./sse.js"
+import { setSseHeaders, startKeepalive, writeSseData, writeSseDone, writeSseEvent, type StreamFormat } from "./sse.js"
 
 /** How long a streaming request will keep retrying a transiently-failing upstream
  * (behind an already-open SSE heartbeat) before giving up. The client sees a slow
@@ -59,6 +59,7 @@ export async function acquireStreamingUpstream(
   res: ExpressResponse,
   url: string,
   init: RequestInit,
+  format: StreamFormat,
 ): Promise<Response | null> {
   // ---- phase 1: quick attempt, headers not sent yet ----
   let quick: Response | null = null
@@ -70,7 +71,7 @@ export async function acquireStreamingUpstream(
 
   if (quick && quick.ok && quick.body) {
     setSseHeaders(res)
-    startKeepalive(res)
+    startKeepalive(res, format)
     return quick
   }
   if (quick && !quick.ok && !isRetryableStatus(quick.status)) {
@@ -82,7 +83,7 @@ export async function acquireStreamingUpstream(
 
   // ---- phase 2: transient failure — open the stream + heartbeat, then ride it out ----
   setSseHeaders(res)
-  startKeepalive(res)
+  startKeepalive(res, format)
   const good = await fetchUpstreamUntil(url, init, streamDeadlineMs())
   if (good && good.ok && good.body) return good
 
@@ -91,8 +92,13 @@ export async function acquireStreamingUpstream(
     const { body } = await readUpstreamError(good)
     message = body.error.message
   }
-  writeSseData(res, { error: { message, type: "upstream_error" } })
-  writeSseDone(res)
+  // Emit the terminal error in the client's own SSE dialect.
+  if (format === "anthropic") {
+    writeSseEvent(res, "error", JSON.stringify({ type: "error", error: { type: "upstream_error", message } }))
+  } else {
+    writeSseData(res, { error: { message, type: "upstream_error" } })
+    writeSseDone(res)
+  }
   if (!res.writableEnded) res.end()
   return null
 }

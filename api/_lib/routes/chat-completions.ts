@@ -82,7 +82,7 @@ async function forwardOpenAIChat(
   }
 
   if (wantStream) {
-    const upstreamRes = await acquireStreamingUpstream(res, url, init)
+    const upstreamRes = await acquireStreamingUpstream(res, url, init, "openai")
     if (!upstreamRes) return // client error forwarded, or SSE error already emitted
     const reader = upstreamRes.body!.getReader()
     res.on("close", () => safeCancel(reader))
@@ -126,7 +126,7 @@ async function forwardAnthropicAsOpenAI(
   }
 
   if (wantStream) {
-    const upstreamRes = await acquireStreamingUpstream(res, url, init)
+    const upstreamRes = await acquireStreamingUpstream(res, url, init, "openai")
     if (!upstreamRes) return
     res.on("close", () => safeCancel(upstreamRes.body))
     await pipeAnthropicStreamToOpenai(upstreamRes.body!, res, body.model)

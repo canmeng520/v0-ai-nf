@@ -84,7 +84,7 @@ async function forwardAnthropicMessages(
   const init: RequestInit = { method: "POST", headers, body: JSON.stringify(outBody) }
 
   if (wantStream) {
-    const upstreamRes = await acquireStreamingUpstream(res, url, init)
+    const upstreamRes = await acquireStreamingUpstream(res, url, init, "anthropic")
     if (!upstreamRes) return
     const reader = upstreamRes.body!.getReader()
     res.on("close", () => safeCancel(reader))
@@ -128,7 +128,7 @@ async function forwardOpenAIAsAnthropic(
   }
 
   if (wantStream) {
-    const upstreamRes = await acquireStreamingUpstream(res, url, init)
+    const upstreamRes = await acquireStreamingUpstream(res, url, init, "anthropic")
     if (!upstreamRes) return
     res.on("close", () => safeCancel(upstreamRes.body))
     await pipeOpenaiStreamToAnthropic(upstreamRes.body!, res, body.model)
