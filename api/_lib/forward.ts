@@ -8,21 +8,26 @@ import {
 } from "./upstream.js"
 import { setSseHeaders, startKeepalive, writeSseData, writeSseDone, writeSseEvent, type StreamFormat } from "./sse.js"
 
-/** How long a streaming request will keep retrying a transiently-failing upstream
- * (behind an already-open SSE heartbeat) before giving up. The client sees a slow
- * first token instead of a 500. Override with UPSTREAM_STREAM_RETRY_MS. */
+// Netlify's sync function timeout defaults to ~30s. We keep the retry-wait window
+// below it so we return a clean error rather than getting killed mid-response,
+// leaving headroom for the eventual successful upstream call to actually run.
+
+/** How long a streaming request keeps retrying a transiently-failing upstream
+ * (behind an already-open SSE heartbeat) before giving up. Waiting counts against
+ * the function budget, so leave room for the stream itself. Override with
+ * UPSTREAM_STREAM_RETRY_MS. */
 function streamDeadlineMs(): number {
   const v = Number(process.env.UPSTREAM_STREAM_RETRY_MS)
-  return Number.isFinite(v) && v > 0 ? v : 45_000
+  return Number.isFinite(v) && v > 0 ? v : 20_000
 }
 
 /** How long a NON-streaming request rides out a transiently-failing upstream
- * before returning 502. Bounded well under the serverless sync-timeout (default
- * ~10s) since nothing can be sent to the client until the whole call returns.
- * Override with UPSTREAM_NONSTREAM_RETRY_MS. */
+ * before returning 502. Nothing reaches the client until the whole call returns,
+ * so this + the successful call must fit the ~30s function timeout. Override with
+ * UPSTREAM_NONSTREAM_RETRY_MS. */
 function nonStreamDeadlineMs(): number {
   const v = Number(process.env.UPSTREAM_NONSTREAM_RETRY_MS)
-  return Number.isFinite(v) && v > 0 ? v : 7_000
+  return Number.isFinite(v) && v > 0 ? v : 18_000
 }
 
 /**
