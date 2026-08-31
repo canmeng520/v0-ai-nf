@@ -282,11 +282,31 @@ export interface RideOutResult {
  * Returns the Response in `res`, or `res: null` if it kept failing transiently
  * past the deadline, along with attempt/elapsed/lastError diagnostics.
  */
+/** A sustained 429 is account-level rate limiting, not a recoverable blip. Retry
+ * only a few times for transient spikes, then FORWARD the 429 to the client
+ * (with its Retry-After) so it can back off / fail over — far better than burning
+ * the whole deadline and returning a less-actionable 502. */
+const MAX_429_RETRIES = 2
+
 export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlineMs: number): Promise<RideOutResult> {
   const host = hostOf(url)
   const start = Date.now()
   let lastError: string | undefined
   let attempts = 0
+  let rateLimitHits = 0
+  // Last retryable HTTP response (429/5xx) kept so we can forward it on give-up
+  // instead of throwing a generic 502. Only network throws leave this null.
+  let lastRetryableRes: Response | null = null
+  const supersede = (res: Response | null) => {
+    if (lastRetryableRes && lastRetryableRes !== res) {
+      try {
+        void lastRetryableRes.body?.cancel()
+      } catch {
+        /* ignore */
+      }
+    }
+    lastRetryableRes = res
+  }
   for (let attempt = 0; ; attempt++) {
     attempts = attempt + 1
     const ac = new AbortController()
@@ -299,12 +319,20 @@ export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlin
       if (!RETRYABLE_STATUS.has(res.status)) return { res, attempts, elapsedMs: Date.now() - start } // 4xx → forward
       lastError = `status ${res.status}`
       logger.warn({ host, status: res.status, attempt, ms: Date.now() - t0 }, "upstream retryable status")
+      supersede(res)
+      if (res.status === 429 && ++rateLimitHits > MAX_429_RETRIES) {
+        // Sustained rate limit — stop retrying, forward the 429 as-is.
+        return { res: lastRetryableRes, attempts, elapsedMs: Date.now() - start, lastError }
+      }
     } catch (err) {
       clearTimeout(timer)
       lastError = describeFetchError(err)
       logger.warn({ host, attempt, ms: Date.now() - t0, err: lastError }, "upstream attempt failed")
     }
-    if (Date.now() - start >= deadlineMs) return { res: null, attempts, elapsedMs: Date.now() - start, lastError }
+    if (Date.now() - start >= deadlineMs) {
+      // Forward the last 429/5xx if we have one; only pure network failures give null.
+      return { res: lastRetryableRes, attempts, elapsedMs: Date.now() - start, lastError }
+    }
     await delay(Math.min(700 * (attempt + 1) + Math.floor(Math.random() * 400), 2500))
   }
 }

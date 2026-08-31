@@ -83,8 +83,10 @@ export async function acquireStreamingUpstream(
     startKeepalive(res, format)
     return quick
   }
-  if (quick && !quick.ok && !isRetryableStatus(quick.status)) {
-    // Genuine client error — preserve the real status; no stream.
+  if (quick && !quick.ok && (!isRetryableStatus(quick.status) || quick.status === 429)) {
+    // Genuine client error OR a rate limit — preserve the real status (headers
+    // not sent yet) so the client can back off / fail over. Don't open a stream
+    // and bury a 429 in an SSE error.
     const { status, body } = await readUpstreamError(quick)
     res.status(status).json(body)
     return null
