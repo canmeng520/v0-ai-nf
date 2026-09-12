@@ -337,6 +337,21 @@ export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlin
   }
 }
 
+/**
+ * Read a SUCCESSFUL (2xx) upstream response body as JSON. Some gateways answer an
+ * unknown model with `200 OK` + an HTML error page; a bare `res.json()` then throws
+ * `Unexpected token '<'`, which surfaces to the client as a confusing 500. Guard it
+ * so a non-JSON body becomes a clean, redacted 502 instead.
+ */
+export async function readUpstreamJson(res: Response): Promise<unknown> {
+  const text = await res.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new UpstreamUnreachableError(`upstream returned a non-JSON response (status ${res.status})`, 0)
+  }
+}
+
 /** Pull just message/type/code out of whatever error shape the upstream sent,
  * dropping every other field (user_id, request_id, provider, org, …) so no
  * channel/account metadata is forwarded. The message is URL/host-redacted. */

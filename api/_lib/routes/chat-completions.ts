@@ -5,6 +5,7 @@ import {
   getAnthropicConfig,
   readOidcToken,
   readUpstreamError,
+  readUpstreamJson,
   type UpstreamConfig,
 } from "../upstream.js"
 import { safeCancel } from "../sse.js"
@@ -106,7 +107,7 @@ async function forwardOpenAIChat(
     logger.warn({ status, raw, origin: cfg.origin }, "openai-format upstream error")
     return res.status(status).json(errBody)
   }
-  const json = await upstreamRes.json()
+  const json = await readUpstreamJson(upstreamRes)
   return res.status(200).json(json)
 }
 
@@ -139,7 +140,7 @@ async function forwardAnthropicAsOpenAI(
     logger.warn({ status, raw }, "anthropic upstream error (chat conversion)")
     return res.status(status).json(errBody)
   }
-  const upstreamJson = await upstreamRes.json()
+  const upstreamJson = await readUpstreamJson(upstreamRes)
   const converted = anthropicResponseToOpenai(upstreamJson as never)
   return res.status(200).json(converted)
 }

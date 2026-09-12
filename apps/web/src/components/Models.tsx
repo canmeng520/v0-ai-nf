@@ -11,13 +11,13 @@ interface Model {
 // Static fallback — shown until the live list loads, or if /v1/models is locked
 // behind a non-default token.
 const fallbackModels: Model[] = [
-  { id: "gpt-5.2", provider: "OpenAI" },
-  { id: "gpt-5-mini", provider: "OpenAI" },
-  { id: "gpt-5-nano", provider: "OpenAI" },
-  { id: "o4-mini", provider: "OpenAI" },
+  { id: "gpt-5.5", provider: "OpenAI" },
+  { id: "gpt-5.4", provider: "OpenAI" },
+  { id: "gpt-5.4-mini", provider: "OpenAI" },
   { id: "o3", provider: "OpenAI" },
-  { id: "claude-opus-4-6", provider: "Anthropic" },
-  { id: "claude-sonnet-4-6", provider: "Anthropic" },
+  { id: "claude-fable-5", provider: "Anthropic" },
+  { id: "claude-opus-5", provider: "Anthropic" },
+  { id: "claude-sonnet-5", provider: "Anthropic" },
   { id: "claude-haiku-4-5", provider: "Anthropic" },
 ]
 

@@ -17,14 +17,15 @@ export interface ModelInfo {
  */
 export const FALLBACK_MODELS: ModelInfo[] = [
   // OpenAI
-  { id: "gpt-5.2", provider: "openai", context_window: 400_000 },
-  { id: "gpt-5-mini", provider: "openai", context_window: 400_000 },
-  { id: "gpt-5-nano", provider: "openai", context_window: 400_000 },
-  { id: "o4-mini", provider: "openai", context_window: 200_000 },
+  { id: "gpt-5.5", provider: "openai", context_window: 400_000 },
+  { id: "gpt-5.4", provider: "openai", context_window: 400_000 },
+  { id: "gpt-5.4-mini", provider: "openai", context_window: 400_000 },
+  { id: "gpt-5.4-nano", provider: "openai", context_window: 400_000 },
   { id: "o3", provider: "openai", context_window: 200_000 },
   // Anthropic
-  { id: "claude-opus-4-6", provider: "anthropic", context_window: 200_000 },
-  { id: "claude-sonnet-4-6", provider: "anthropic", context_window: 200_000 },
+  { id: "claude-fable-5", provider: "anthropic", context_window: 1_000_000 },
+  { id: "claude-opus-5", provider: "anthropic", context_window: 1_000_000 },
+  { id: "claude-sonnet-5", provider: "anthropic", context_window: 1_000_000 },
   { id: "claude-haiku-4-5", provider: "anthropic", context_window: 200_000 },
 ]
 
@@ -39,6 +40,7 @@ const FALLBACK_MAP = new Map(FALLBACK_MODELS.map((m) => [m.id, m]))
  */
 const NETLIFY_DIRECT_ANTHROPIC = [
   "claude-fable-5",
+  "claude-fable-5-1",
   "claude-haiku-4-5",
   "claude-haiku-4-5-20251001",
   "claude-opus-4-5",

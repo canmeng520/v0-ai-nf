@@ -5,6 +5,7 @@ import {
   getAnthropicConfig,
   readOidcToken,
   readUpstreamError,
+  readUpstreamJson,
   sanitizeAnthropicBody,
   type UpstreamConfig,
 } from "../upstream.js"
@@ -108,7 +109,7 @@ async function forwardAnthropicMessages(
     logger.warn({ status, raw, origin: cfg.origin }, "anthropic-format upstream error")
     return res.status(status).json(errBody)
   }
-  const json = await upstreamRes.json()
+  const json = await readUpstreamJson(upstreamRes)
   return res.status(200).json(json)
 }
 
@@ -141,7 +142,7 @@ async function forwardOpenAIAsAnthropic(
     logger.warn({ status, raw }, "openai upstream error (messages conversion)")
     return res.status(status).json(errBody)
   }
-  const upstreamJson = await upstreamRes.json()
+  const upstreamJson = await readUpstreamJson(upstreamRes)
   const converted = openaiResponseToAnthropic(upstreamJson as never)
   return res.status(200).json(converted)
 }
