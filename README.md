@@ -40,6 +40,13 @@ Credentials are resolved in the order **explicit override → platform-injected 
 2. `OPENAI_API_KEY`+`OPENAI_BASE_URL` / `ANTHROPIC_API_KEY`+`ANTHROPIC_BASE_URL` (standard SDK vars; **Netlify's AI Gateway injects these automatically**)
 3. `AI_GATEWAY_API_KEY` / Vercel OIDC / `NETLIFY_AI_GATEWAY_KEY`+`NETLIFY_AI_GATEWAY_BASE_URL` (unified gateway)
 
+## WebSocket / Codex (`wss://`)
+
+Codex 0.128+ streams the Responses API over a WebSocket (`wss://…/v1/responses`), and the Realtime API is WebSocket-only.
+
+- **Netlify / Vercel (serverless): no `wss://`.** Netlify Functions and Edge Functions cannot serve WebSocket upgrades ([Netlify docs](https://docs.netlify.com/build/functions/overview/)). Codex's wss attempt fails and it **falls back to HTTP+SSE `POST /v1/responses`**, which the gateway now forwards — so Codex works, without the wss latency optimization.
+- **Self-host (`pnpm start`): real `wss://`.** `dev-server.ts` is a long-running Node server and attaches a WebSocket bridge (`api/_lib/ws-bridge.ts`) on `wss://<host>/v1/responses` and `/v1/realtime`. It authenticates the client (Bearer / `?api_key=`), opens a WebSocket to the **OpenAI upstream** with the upstream key injected, and pipes frames both ways. The upstream must itself be wss-capable — i.e. a **direct OpenAI key** (`AI_INTEGRATIONS_OPENAI_*`); the Netlify AI Gateway does not support wss, and the bridge refuses with a clear close reason if the resolved base points there. Deploy on any always-on host (Render / Railway / Fly / a VPS).
+
 ## Deployment
 
 This project deploys to **both** Vercel and Netlify from the same `api/_lib` core:
