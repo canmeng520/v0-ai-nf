@@ -48,10 +48,18 @@ export async function toExpressReq(request: Request, pathname: string): Promise<
     }
   }
 
+  // Preserve the query string so generic passthrough handlers can forward it.
+  let search = ""
+  try {
+    search = new URL(request.url).search
+  } catch {
+    /* ignore */
+  }
+
   return {
     method: request.method,
     path: pathname,
-    originalUrl: pathname,
+    originalUrl: pathname + search,
     headers,
     header: (name: string) => headers[name.toLowerCase()],
     body,

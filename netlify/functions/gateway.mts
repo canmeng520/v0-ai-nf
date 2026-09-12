@@ -12,6 +12,7 @@ import { buildHealth } from "../../api/_lib/health.js"
 import { listModels, debugEnabled } from "../../api/_lib/models.js"
 import { handleChatCompletions } from "../../api/_lib/routes/chat-completions.js"
 import { handleMessages } from "../../api/_lib/routes/messages.js"
+import { handleOpenAIPassthrough } from "../../api/_lib/routes/passthrough.js"
 import { redactErrorMessage } from "../../api/_lib/redact.js"
 import { UpstreamUnreachableError } from "../../api/_lib/upstream.js"
 import { runDiag } from "../../api/_lib/diag.js"
@@ -85,6 +86,15 @@ export default async function handler(request: Request): Promise<Response> {
       return
     }
 
+    if (path === "/v1/alpha/search") {
+      if (!isAuthorized((n) => r.header(n) ?? undefined)) {
+        w.status(401).json(UNAUTHORIZED_BODY)
+        return
+      }
+      await handleOpenAIPassthrough(r, xres, "/alpha/search")
+      return
+    }
+
     if (path === "/v1/chat/completions" && method === "POST") {
       if (!isAuthorized((n) => r.header(n) ?? undefined)) {
         w.status(401).json(UNAUTHORIZED_BODY)
@@ -108,5 +118,5 @@ export default async function handler(request: Request): Promise<Response> {
 }
 
 export const config = {
-  path: ["/api/healthz", "/healthz", "/v1", "/v1/models", "/v1/diag", "/v1/chat/completions", "/v1/messages"],
+  path: ["/api/healthz", "/healthz", "/v1", "/v1/models", "/v1/diag", "/v1/alpha/search", "/v1/chat/completions", "/v1/messages"],
 }

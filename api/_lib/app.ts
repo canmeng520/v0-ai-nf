@@ -6,6 +6,7 @@ import { listModels, debugEnabled } from "./models.js"
 import { buildHealth } from "./health.js"
 import { handleChatCompletions } from "./routes/chat-completions.js"
 import { handleMessages } from "./routes/messages.js"
+import { handleOpenAIPassthrough } from "./routes/passthrough.js"
 import { readOidcToken, UpstreamUnreachableError } from "./upstream.js"
 import { redactErrorMessage } from "./redact.js"
 import { runDiag } from "./diag.js"
@@ -50,6 +51,11 @@ export function createApp() {
 
   app.post("/v1/messages", bearerAuth, (req, res, next) => {
     Promise.resolve(handleMessages(req, res)).catch(next)
+  })
+
+  // ----- OpenAI passthrough for extra endpoints (search, responses, …) -----
+  app.all("/v1/alpha/search", bearerAuth, (req, res, next) => {
+    Promise.resolve(handleOpenAIPassthrough(req, res, "/alpha/search")).catch(next)
   })
 
   // ----- on-demand upstream diagnostics (auth-gated; masks host) -----
