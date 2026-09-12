@@ -54,8 +54,15 @@ export function createApp() {
   })
 
   // ----- OpenAI passthrough for extra endpoints (search, responses, …) -----
+  // NOTE: `/v1/responses` here is the HTTP+SSE transport. Codex tries a
+  // `wss://` upgrade first, which Netlify cannot serve; it then falls back to
+  // this POST endpoint. See README "WebSocket / Codex".
   app.all("/v1/alpha/search", bearerAuth, (req, res, next) => {
     Promise.resolve(handleOpenAIPassthrough(req, res, "/alpha/search")).catch(next)
+  })
+
+  app.all("/v1/responses", bearerAuth, (req, res, next) => {
+    Promise.resolve(handleOpenAIPassthrough(req, res, "/responses")).catch(next)
   })
 
   // ----- on-demand upstream diagnostics (auth-gated; masks host) -----

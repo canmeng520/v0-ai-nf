@@ -95,6 +95,17 @@ export default async function handler(request: Request): Promise<Response> {
       return
     }
 
+    // Codex tries wss://…/v1/responses first (Netlify can't upgrade → the client
+    // falls back to this HTTP+SSE POST). Any method is forwarded verbatim.
+    if (path === "/v1/responses") {
+      if (!isAuthorized((n) => r.header(n) ?? undefined)) {
+        w.status(401).json(UNAUTHORIZED_BODY)
+        return
+      }
+      await handleOpenAIPassthrough(r, xres, "/responses")
+      return
+    }
+
     if (path === "/v1/chat/completions" && method === "POST") {
       if (!isAuthorized((n) => r.header(n) ?? undefined)) {
         w.status(401).json(UNAUTHORIZED_BODY)
@@ -118,5 +129,5 @@ export default async function handler(request: Request): Promise<Response> {
 }
 
 export const config = {
-  path: ["/api/healthz", "/healthz", "/v1", "/v1/models", "/v1/diag", "/v1/alpha/search", "/v1/chat/completions", "/v1/messages"],
+  path: ["/api/healthz", "/healthz", "/v1", "/v1/models", "/v1/diag", "/v1/alpha/search", "/v1/responses", "/v1/chat/completions", "/v1/messages"],
 }
