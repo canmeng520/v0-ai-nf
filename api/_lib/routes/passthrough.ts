@@ -77,14 +77,16 @@ async function proxyRaw(
   const url = `${cfg.baseUrl}${subpath}${search}`
 
   let bodyStr: string | undefined
-  if (method !== "GET" && method !== "HEAD" && req.body && Object.keys(req.body).length > 0) {
-    if (which === "openai" && (req.body as { model?: string }).model) {
+  if (method !== "GET" && method !== "HEAD") {
+    if (which === "openai" && req.body && (req.body as { model?: string }).model) {
       const b = req.body as { model?: string }
       b.model = applyModelMap(b.model!)
       if (cfg.gateway && !b.model.includes("/")) b.model = `openai/${b.model}`
     }
+    // Always send content-type + a JSON body (even `{}`) on writes — some
+    // gateways 400 a POST without a content-type (e.g. Codex's body-less cancel).
     headers["content-type"] = "application/json"
-    bodyStr = JSON.stringify(req.body)
+    bodyStr = JSON.stringify(req.body ?? {})
   }
 
   const upstreamRes = await fetchUpstream(url, { method, headers, body: bodyStr })
