@@ -1,6 +1,7 @@
 import { getOpenAIConfig, getAnthropicConfig, type UpstreamCtx } from "./upstream.js"
 import { envDiag } from "./models.js"
 import { describeFetchError } from "./redact.js"
+import { isReasoningModel } from "./convert.js"
 
 /**
  * On-demand live probe of the upstream — fires the SAME request the hot path
@@ -105,9 +106,12 @@ export async function runDiag(ctx: UpstreamCtx, params: Params) {
     else headers["x-api-key"] = cfg.apiKey
   }
   const outModel = cfg.gateway ? `${provider}/${model}` : model
+  // gpt-5+/o-series reject `max_tokens` on chat/completions — mirror the real
+  // route's field selection so diag probes these models instead of always 400ing.
+  const tokenField = provider === "openai" && isReasoningModel(model) ? "max_completion_tokens" : "max_tokens"
   const body = JSON.stringify({
     model: outModel,
-    max_tokens: 8,
+    [tokenField]: 8,
     stream,
     messages: [{ role: "user", content: "ping" }],
   })
