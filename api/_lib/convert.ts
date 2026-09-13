@@ -17,13 +17,17 @@ function makeId(prefix: string) {
 }
 
 /**
- * gpt-5 and the o-series reasoning models reject the legacy `max_tokens` field
- * on Chat Completions — they require `max_completion_tokens`. A leading
- * `provider/` gateway prefix (e.g. `openai/gpt-5`) is tolerated.
+ * gpt-5+ (gpt-5, gpt-6, and later) and the o-series reasoning models reject the
+ * legacy `max_tokens` field on Chat Completions — they require
+ * `max_completion_tokens`. A leading `provider/` gateway prefix (e.g.
+ * `openai/gpt-6-astra`) is tolerated. Matches gpt-<N> for N>=5 so future
+ * generations don't regress the way gpt-6 did.
  */
 export function isReasoningModel(model: string): boolean {
   const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model
-  return /^(gpt-5|o[0-9])/i.test(bare)
+  const gptGen = /^gpt-(\d+)/i.exec(bare)
+  if (gptGen && Number(gptGen[1]) >= 5) return true
+  return /^o[0-9]/i.test(bare)
 }
 
 /** Set the correct max-output-tokens field for the target OpenAI model. */
