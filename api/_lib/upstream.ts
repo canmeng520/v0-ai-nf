@@ -1,6 +1,7 @@
-import { fetch as undiciFetch, Agent as UndiciAgent } from "undici"
+import { fetch as undiciFetch } from "undici"
 import { redactUrls, redactDeep, describeFetchError } from "./redact.js"
 import { logger } from "./logger.js"
+import { pickDispatcher, proxyPoolSize } from "./proxy-pool.js"
 
 /** Host for logging (server-side only; safe to include the real host). */
 function hostOf(url: string): string {
@@ -12,23 +13,18 @@ function hostOf(url: string): string {
 }
 
 /**
- * Shared upstream connection pool. Node's built-in fetch keeps idle sockets for
- * only ~4s, so a warm function instance re-handshakes TCP+TLS between requests —
- * one source of transient `fetch failed [ECONNRESET]`s. A 60s keepalive keeps
- * connections reusable across consecutive requests (pattern from sub2api's
- * upstream client pool: long idle timeout, bounded per-host connections,
- * explicit dial timeout).
+ * All upstream requests go through this single choke point. The dispatcher is a
+ * shared keep-alive pool (Node's built-in fetch drops idle sockets after ~4s,
+ * causing reconnect churn / transient ECONNRESETs) — or, when `UPSTREAM_PROXIES`
+ * is set, a rotating HTTP-proxy from the pool so the upstream sees many source
+ * IPs. Rotation is per call, so a retry lands on the next proxy automatically.
+ * undici's Response is the same implementation Node's global fetch uses, so the
+ * cast is safe.
  */
-const upstreamDispatcher = new UndiciAgent({
-  keepAliveTimeout: 60_000,
-  connections: 128,
-  connect: { timeout: 10_000 },
-})
-
-/** All upstream requests go through this single choke point. undici's Response
- * is the same implementation Node's global fetch uses, so the cast is safe. */
 function upstreamFetch(url: string, init: RequestInit): Promise<Response> {
-  return undiciFetch(url, { ...(init as object), dispatcher: upstreamDispatcher } as never) as unknown as Promise<Response>
+  const { dispatcher, label } = pickDispatcher(url)
+  if (proxyPoolSize() > 0) logger.debug({ egress: label, host: hostOf(url) }, "upstream egress")
+  return undiciFetch(url, { ...(init as object), dispatcher } as never) as unknown as Promise<Response>
 }
 
 const VERCEL_GATEWAY_BASE = "https://ai-gateway.vercel.sh"

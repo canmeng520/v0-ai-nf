@@ -2,6 +2,7 @@ import { getOpenAIConfig, getAnthropicConfig, type UpstreamCtx } from "./upstrea
 import { envDiag } from "./models.js"
 import { describeFetchError } from "./redact.js"
 import { isReasoningModel } from "./convert.js"
+import { proxyPoolSize } from "./proxy-pool.js"
 
 /**
  * On-demand live probe of the upstream — fires the SAME request the hot path
@@ -136,6 +137,7 @@ export async function runDiag(ctx: UpstreamCtx, params: Params) {
   return {
     target: { provider, model: outModel, stream, baseMasked: maskBase(cfg.baseUrl), gateway: cfg.gateway, native: cfg.native, origin: cfg.origin },
     summary: { n, concurrency, ok, fail: n - ok, byError, msP50: p50, msMax: durations[durations.length - 1] ?? 0 },
+    egress: { proxies: proxyPoolSize(), viaProxy: proxyPoolSize() > 0 && !cfg.baseUrl.includes("/.netlify/ai") },
     attempts,
     env: envDiag(ctx),
   }
