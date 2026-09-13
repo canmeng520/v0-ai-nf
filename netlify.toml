@@ -17,5 +17,6 @@
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
-  # pino uses dynamic requires that don't bundle cleanly; let the runtime load it.
-  external_node_modules = ["pino"]
+  # pino uses dynamic requires that don't bundle cleanly; undici ships wasm
+  # assets esbuild can't inline. Let the runtime load both from node_modules.
+  external_node_modules = ["pino", "undici"]

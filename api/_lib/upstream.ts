@@ -1,3 +1,4 @@
+import { fetch as undiciFetch, Agent as UndiciAgent } from "undici"
 import { redactUrls, redactDeep, describeFetchError } from "./redact.js"
 import { logger } from "./logger.js"
 
@@ -8,6 +9,26 @@ function hostOf(url: string): string {
   } catch {
     return "?"
   }
+}
+
+/**
+ * Shared upstream connection pool. Node's built-in fetch keeps idle sockets for
+ * only ~4s, so a warm function instance re-handshakes TCP+TLS between requests —
+ * one source of transient `fetch failed [ECONNRESET]`s. A 60s keepalive keeps
+ * connections reusable across consecutive requests (pattern from sub2api's
+ * upstream client pool: long idle timeout, bounded per-host connections,
+ * explicit dial timeout).
+ */
+const upstreamDispatcher = new UndiciAgent({
+  keepAliveTimeout: 60_000,
+  connections: 128,
+  connect: { timeout: 10_000 },
+})
+
+/** All upstream requests go through this single choke point. undici's Response
+ * is the same implementation Node's global fetch uses, so the cast is safe. */
+function upstreamFetch(url: string, init: RequestInit): Promise<Response> {
+  return undiciFetch(url, { ...(init as object), dispatcher: upstreamDispatcher } as never) as unknown as Promise<Response>
 }
 
 const VERCEL_GATEWAY_BASE = "https://ai-gateway.vercel.sh"
@@ -98,11 +119,12 @@ function resolveGateway(ctx: UpstreamCtx): { baseUrl: string; apiKey: string; or
  *   2. `OPENAI_API_KEY` + `OPENAI_BASE_URL` (standard SDK vars; Netlify injects both on AI-enabled sites)
  *   3. gateway (`/v1` suffix; models sent as `provider/model`)
  */
-export function getOpenAIConfig(ctx: UpstreamCtx = {}): UpstreamConfig {
+export function getOpenAIConfigChain(ctx: UpstreamCtx = {}): UpstreamConfig[] {
+  const chain: UpstreamConfig[] = []
   const v0Key = process.env.AI_INTEGRATIONS_OPENAI_API_KEY
   if (v0Key) {
     const baseUrl = trimSlash(process.env.AI_INTEGRATIONS_OPENAI_BASE_URL ?? "https://api.openai.com/v1")
-    return { baseUrl, apiKey: v0Key, gateway: false, origin: "openai", native: isNativeHost(baseUrl, "openai") }
+    chain.push({ baseUrl, apiKey: v0Key, gateway: false, origin: "openai", native: isNativeHost(baseUrl, "openai") })
   }
   const sdkKey = process.env.OPENAI_API_KEY
   if (sdkKey) {
@@ -110,13 +132,20 @@ export function getOpenAIConfig(ctx: UpstreamCtx = {}): UpstreamConfig {
     // endpoint: plain model ids, Bearer auth. So it is a DIRECT upstream, not a
     // `provider/model` unified gateway — gateway stays false.
     const baseUrl = trimSlash(process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1")
-    return { baseUrl, apiKey: sdkKey, gateway: false, origin: "openai", native: isNativeHost(baseUrl, "openai") }
+    chain.push({ baseUrl, apiKey: sdkKey, gateway: false, origin: "openai", native: isNativeHost(baseUrl, "openai") })
   }
   const gw = resolveGateway(ctx)
   if (gw) {
-    return { baseUrl: `${gw.baseUrl}/v1`, apiKey: gw.apiKey, gateway: true, origin: gw.origin, native: false }
+    chain.push({ baseUrl: `${gw.baseUrl}/v1`, apiKey: gw.apiKey, gateway: true, origin: gw.origin, native: false })
   }
-  return { baseUrl: "https://api.openai.com/v1", apiKey: "", gateway: false, origin: "openai", native: true }
+  if (chain.length === 0) {
+    chain.push({ baseUrl: "https://api.openai.com/v1", apiKey: "", gateway: false, origin: "openai", native: true })
+  }
+  return finalizeChain(chain)
+}
+
+export function getOpenAIConfig(ctx: UpstreamCtx = {}): UpstreamConfig {
+  return getOpenAIConfigChain(ctx)[0]
 }
 
 /**
@@ -125,24 +154,53 @@ export function getOpenAIConfig(ctx: UpstreamCtx = {}): UpstreamConfig {
  *   2. `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` (standard SDK vars; Netlify injects both)
  *   3. gateway (no `/v1` suffix — the Messages route appends `/v1/messages`)
  */
-export function getAnthropicConfig(ctx: UpstreamCtx = {}): UpstreamConfig {
+export function getAnthropicConfigChain(ctx: UpstreamCtx = {}): UpstreamConfig[] {
+  const chain: UpstreamConfig[] = []
   const v0Key = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY
   if (v0Key) {
     const baseUrl = trimSlash(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ?? "https://api.anthropic.com")
-    return { baseUrl, apiKey: v0Key, gateway: false, origin: "anthropic", native: isNativeHost(baseUrl, "anthropic") }
+    chain.push({ baseUrl, apiKey: v0Key, gateway: false, origin: "anthropic", native: isNativeHost(baseUrl, "anthropic") })
   }
   const sdkKey = process.env.ANTHROPIC_API_KEY
   if (sdkKey) {
     // Netlify's injected ANTHROPIC_BASE_URL speaks the native Anthropic protocol
     // (x-api-key, /v1/messages) — a direct upstream, not a unified gateway.
     const baseUrl = trimSlash(process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com")
-    return { baseUrl, apiKey: sdkKey, gateway: false, origin: "anthropic", native: isNativeHost(baseUrl, "anthropic") }
+    chain.push({ baseUrl, apiKey: sdkKey, gateway: false, origin: "anthropic", native: isNativeHost(baseUrl, "anthropic") })
   }
   const gw = resolveGateway(ctx)
   if (gw) {
-    return { baseUrl: gw.baseUrl, apiKey: gw.apiKey, gateway: true, origin: gw.origin, native: false }
+    chain.push({ baseUrl: gw.baseUrl, apiKey: gw.apiKey, gateway: true, origin: gw.origin, native: false })
   }
-  return { baseUrl: "https://api.anthropic.com", apiKey: "", gateway: false, origin: "anthropic", native: true }
+  if (chain.length === 0) {
+    chain.push({ baseUrl: "https://api.anthropic.com", apiKey: "", gateway: false, origin: "anthropic", native: true })
+  }
+  return finalizeChain(chain)
+}
+
+export function getAnthropicConfig(ctx: UpstreamCtx = {}): UpstreamConfig {
+  return getAnthropicConfigChain(ctx)[0]
+}
+
+/**
+ * Dedupe a credential chain (same baseUrl+key resolved via two env routes) and
+ * honor `UPSTREAM_FAILOVER=0`, which pins behavior to the primary upstream only.
+ * The chain is the failover order: when the primary exhausts its retry budget
+ * on a failover-worthy error, forward.ts advances to the next entry — the same
+ * account-switching idea sub2api uses, adapted to our credential resolution.
+ */
+function finalizeChain(chain: UpstreamConfig[]): UpstreamConfig[] {
+  const seen = new Set<string>()
+  const out = chain.filter((c) => {
+    const k = `${c.baseUrl}|${c.apiKey}`
+    if (seen.has(k)) return false
+    seen.add(k)
+    return true
+  })
+  if (process.env.UPSTREAM_FAILOVER === "0" || process.env.UPSTREAM_FAILOVER === "false") {
+    return out.slice(0, 1)
+  }
+  return out
 }
 
 /**
@@ -171,8 +229,9 @@ export function sanitizeAnthropicBody<T extends Record<string, unknown>>(body: T
   return out ?? body
 }
 
-/** Transient upstream statuses worth retrying before any bytes reach the client. */
-const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+/** Transient upstream statuses worth retrying before any bytes reach the client.
+ * 529 is Anthropic's overloaded_error — transient by definition. */
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529])
 /** Cap any single backoff so retries can't blow the serverless function's time limit. */
 const MAX_RETRY_WAIT_MS = 2000
 /** Abort a request that hasn't produced RESPONSE HEADERS within this window and
@@ -234,7 +293,7 @@ export async function fetchUpstream(url: string, init: RequestInit, retries = 4)
     const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), RESPONSE_TIMEOUT_MS)
     const t0 = Date.now()
     try {
-      const res = await fetch(url, { ...init, signal: ac.signal })
+      const res = await upstreamFetch(url, { ...init, signal: ac.signal })
       // Headers received — stop the timer so a slow stream/generation body is
       // never cut, and hand the response to the caller.
       clearTimeout(timer)
@@ -313,7 +372,7 @@ export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlin
     const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), RESPONSE_TIMEOUT_MS)
     const t0 = Date.now()
     try {
-      const res = await fetch(url, { ...init, signal: ac.signal })
+      const res = await upstreamFetch(url, { ...init, signal: ac.signal })
       clearTimeout(timer)
       if (res.ok && res.body) return { res, attempts, elapsedMs: Date.now() - start }
       if (!RETRYABLE_STATUS.has(res.status)) return { res, attempts, elapsedMs: Date.now() - start } // 4xx → forward

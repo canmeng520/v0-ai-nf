@@ -73,6 +73,30 @@ const PROVIDER_PREFIXES: Record<string, Provider | undefined> = {
   deepseek: undefined,
 }
 
+/**
+ * Optional client→upstream model renaming (sub2api's model mapping, env-sized):
+ * `MODEL_MAP="gpt-4=gpt-5.4,claude-3-5-sonnet-20241022=claude-sonnet-5"` lets
+ * old clients keep their configured names. Unmapped names pass through.
+ */
+let modelMapCache: { raw: string | undefined; map: Map<string, string> } | null = null
+
+export function applyModelMap(model: string): string {
+  const raw = process.env.MODEL_MAP
+  if (!raw) return model
+  if (!modelMapCache || modelMapCache.raw !== raw) {
+    const map = new Map<string, string>()
+    for (const pair of raw.split(",")) {
+      const eq = pair.indexOf("=")
+      if (eq <= 0) continue
+      const from = pair.slice(0, eq).trim()
+      const to = pair.slice(eq + 1).trim()
+      if (from && to) map.set(from, to)
+    }
+    modelMapCache = { raw, map }
+  }
+  return modelMapCache.map.get(model) ?? model
+}
+
 export function getProvider(model: string): Provider {
   const clean = stripProviderPrefix(model).id
   const exact = FALLBACK_MAP.get(clean)

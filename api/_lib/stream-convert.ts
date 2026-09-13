@@ -1,6 +1,7 @@
 import type { Response } from "express"
 import { parseSseStream, writeSseData, writeSseDone, writeSseEvent } from "./sse.js"
 import { redactUrls, redactErrorMessage } from "./redact.js"
+import { logger } from "./logger.js"
 
 // =============================================================
 // Anthropic SSE -> OpenAI chat.completion.chunk SSE
@@ -145,6 +146,7 @@ export async function pipeAnthropicStreamToOpenai(
     // Final chunk with finish_reason
     sendChunk({}, finishReason ?? "stop")
     writeSseDone(res)
+    logger.info({ model, usage, finishReason }, "converted stream complete (anthropic→openai)")
   } catch (err) {
     writeSseData(res, {
       error: { message: redactErrorMessage(err), type: "stream_error" },
@@ -303,6 +305,10 @@ export async function pipeOpenaiStreamToAnthropic(
       usage: { input_tokens: promptTokens, output_tokens: completionTokens },
     })
     send("message_stop", {})
+    logger.info(
+      { model, usage: { input_tokens: promptTokens, output_tokens: completionTokens }, stopReason },
+      "converted stream complete (openai→anthropic)",
+    )
   } catch (err) {
     send("error", { error: { type: "stream_error", message: redactErrorMessage(err) } })
   } finally {

@@ -26,10 +26,24 @@ function heartbeatPayload(format: StreamFormat): string {
 
 export function startKeepalive(res: Response, format: StreamFormat = "openai", intervalMs = 5000) {
   const payload = heartbeatPayload(format)
+
+  // Suppress heartbeats while real data is flowing (sub2api's pattern): wrap
+  // res.write once so every write stamps lastWrite, and only ping when the
+  // stream has been idle for a full interval. Saves bytes and avoids pointless
+  // pings interleaved into an active stream.
+  let lastWrite = Date.now()
+  const origWrite = res.write.bind(res) as (...args: unknown[]) => boolean
+  ;(res as unknown as { write: (...args: unknown[]) => boolean }).write = (...args: unknown[]) => {
+    lastWrite = Date.now()
+    return origWrite(...args)
+  }
+
   const id = setInterval(() => {
     if (res.writableEnded) return
+    if (Date.now() - lastWrite < intervalMs) return
     try {
-      res.write(payload)
+      origWrite(payload)
+      lastWrite = Date.now()
     } catch {
       // ignore
     }
@@ -38,6 +52,35 @@ export function startKeepalive(res: Response, format: StreamFormat = "openai", i
   res.on("close", stop)
   res.on("finish", stop)
   return stop
+}
+
+/** Stall watchdog window for upstream streams (sub2api `stream_data_interval_timeout`).
+ * `STREAM_STALL_TIMEOUT_MS` overrides; `0` disables. */
+export function stallTimeoutMs(): number {
+  const v = Number(process.env.STREAM_STALL_TIMEOUT_MS)
+  if (Number.isFinite(v)) return Math.max(0, v)
+  return 90_000
+}
+
+/**
+ * `reader.read()` raced against a stall timer. Returns "stall" when the upstream
+ * produced nothing for `ms` (0 disables the watchdog). The pending read is left
+ * to the caller to cancel via `safeCancel(reader)`.
+ */
+export async function readWithStall<T>(
+  reader: ReadableStreamDefaultReader<T>,
+  ms: number,
+): Promise<Awaited<ReturnType<ReadableStreamDefaultReader<T>["read"]>> | "stall"> {
+  if (!ms) return reader.read()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const stall = new Promise<"stall">((resolve) => {
+    timer = setTimeout(() => resolve("stall"), ms)
+  })
+  try {
+    return await Promise.race([reader.read(), stall])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export function writeSseEvent(res: Response, eventName: string | null, data: string) {
@@ -85,12 +128,15 @@ export function safeCancel(
 /**
  * Generic line-delimited SSE parser. Yields { event?, data } objects.
  * Multiple `data:` lines are joined with `\n`. Empty lines flush the buffer.
+ * Throws when the upstream stalls past STREAM_STALL_TIMEOUT_MS — the converting
+ * pipes' existing catch blocks turn that into a protocol-correct stream error.
  */
 export async function* parseSseStream(
   body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<{ event: string | null; data: string }> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
+  const stallMs = stallTimeoutMs()
   let buf = ""
   let event: string | null = null
   let dataLines: string[] = []
@@ -104,7 +150,12 @@ export async function* parseSseStream(
   }
 
   while (true) {
-    const { value, done } = await reader.read()
+    const result = await readWithStall(reader, stallMs)
+    if (result === "stall") {
+      safeCancel(reader)
+      throw new Error(`upstream stream stalled (no data for ${Math.round(stallMs / 1000)}s)`)
+    }
+    const { value, done } = result
     if (done) break
     buf += decoder.decode(value, { stream: true })
 

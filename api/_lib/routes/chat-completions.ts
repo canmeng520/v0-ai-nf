@@ -1,16 +1,22 @@
 import type { Request, Response } from "express"
-import { getProvider } from "../models.js"
+import { getProvider, applyModelMap } from "../models.js"
 import {
-  getOpenAIConfig,
-  getAnthropicConfig,
+  getOpenAIConfigChain,
+  getAnthropicConfigChain,
   readOidcToken,
   readUpstreamError,
   readUpstreamJson,
   type UpstreamConfig,
 } from "../upstream.js"
 import { safeCancel } from "../sse.js"
-import { acquireStreamingUpstream, acquireUpstream } from "../forward.js"
-import { openaiToAnthropicRequest, anthropicResponseToOpenai, isReasoningModel } from "../convert.js"
+import {
+  acquireStreamingUpstream,
+  acquireUpstream,
+  pumpRawStream,
+  buildOpenAICandidates,
+  buildAnthropicCandidates,
+} from "../forward.js"
+import { openaiToAnthropicRequest, anthropicResponseToOpenai } from "../convert.js"
 import { pipeAnthropicStreamToOpenai } from "../stream-convert.js"
 import { logger } from "../logger.js"
 import type { OpenAIChatRequest } from "../types.js"
@@ -22,30 +28,31 @@ export async function handleChatCompletions(req: Request, res: Response) {
       error: { message: "Request must include `model` and `messages`.", type: "invalid_request_error" },
     })
   }
+  body.model = applyModelMap(body.model)
 
   const provider = getProvider(body.model)
   const wantStream = body.stream === true
   const ctx = { oidcToken: readOidcToken(req) }
-  const openaiCfg = getOpenAIConfig(ctx)
-  const anthropicCfg = getAnthropicConfig(ctx)
+  const openaiChain = getOpenAIConfigChain(ctx).filter((c) => c.apiKey)
+  const anthropicChain = getAnthropicConfigChain(ctx).filter((c) => c.apiKey)
 
-  // Strategy:
-  // 1. OpenAI-format request + provider=openai → use openai upstream (or gateway with `openai/...`).
-  // 2. OpenAI-format request + provider=anthropic + openai upstream is gateway → call gateway as
-  //    OpenAI-compatible with `anthropic/<model>` (gateway handles cross-provider routing). No conversion needed.
-  // 3. Otherwise (real OpenAI configured but model is anthropic) → convert OpenAI→Anthropic format
-  //    and call anthropic upstream.
+  // Strategy (unchanged selection, now with failover chains):
+  // 1. OpenAI-format request + provider=openai → the OpenAI chain.
+  // 2. provider=anthropic + primary OpenAI upstream is a unified gateway → call
+  //    the gateway's OpenAI surface with `anthropic/<model>` (gateway entries only).
+  // 3. Otherwise → convert OpenAI→Anthropic and use the Anthropic chain.
   if (provider === "openai") {
-    if (!openaiCfg.apiKey) return missingUpstream(res, "openai")
-    return forwardOpenAIChat(body, wantStream, res, openaiCfg, "openai")
+    if (openaiChain.length === 0) return missingUpstream(res, "openai")
+    return forwardOpenAIChat(body, wantStream, res, openaiChain, "openai")
   }
 
   // provider === "anthropic"
-  if (openaiCfg.gateway) {
-    return forwardOpenAIChat(body, wantStream, res, openaiCfg, "anthropic")
+  const gatewayEntries = openaiChain.filter((c) => c.gateway)
+  if (openaiChain[0]?.gateway && gatewayEntries.length > 0) {
+    return forwardOpenAIChat(body, wantStream, res, gatewayEntries, "anthropic")
   }
-  if (!anthropicCfg.apiKey) return missingUpstream(res, "anthropic")
-  return forwardAnthropicAsOpenAI(body, wantStream, res, anthropicCfg)
+  if (anthropicChain.length === 0) return missingUpstream(res, "anthropic")
+  return forwardAnthropicAsOpenAI(body, wantStream, res, anthropicChain)
 }
 
 function missingUpstream(res: Response, which: "openai" | "anthropic") {
@@ -62,49 +69,22 @@ async function forwardOpenAIChat(
   body: OpenAIChatRequest,
   wantStream: boolean,
   res: Response,
-  cfg: UpstreamConfig,
+  chain: UpstreamConfig[],
   modelProvider: "openai" | "anthropic",
 ) {
-  const outBody: OpenAIChatRequest = { ...body }
-  // gpt-5 / o-series reject `max_tokens`; translate a client-sent value so plain
-  // passthrough requests don't 400 on those models.
-  if (isReasoningModel(body.model) && outBody.max_tokens != null && outBody.max_completion_tokens == null) {
-    outBody.max_completion_tokens = outBody.max_tokens
-    delete outBody.max_tokens
-  }
-  if (cfg.gateway) {
-    outBody.model = `${modelProvider}/${body.model}`
-  }
-  const url = `${cfg.baseUrl}/chat/completions`
-  const init: RequestInit = {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify(outBody),
-  }
+  const candidates = buildOpenAICandidates(body, chain, modelProvider)
 
   if (wantStream) {
-    const upstreamRes = await acquireStreamingUpstream(res, url, init, "openai")
+    const upstreamRes = await acquireStreamingUpstream(res, candidates, "openai")
     if (!upstreamRes) return // client error forwarded, or SSE error already emitted
-    const reader = upstreamRes.body!.getReader()
-    res.on("close", () => safeCancel(reader))
-    try {
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        if (value) res.write(Buffer.from(value))
-      }
-    } catch (err) {
-      logger.error({ err }, "openai-format stream pass-through error")
-    } finally {
-      if (!res.writableEnded) res.end()
-    }
+    await pumpRawStream(upstreamRes.body!, res, "openai")
     return
   }
 
-  const upstreamRes = await acquireUpstream(url, init)
+  const upstreamRes = await acquireUpstream(candidates)
   if (!upstreamRes.ok || !upstreamRes.body) {
     const { status, raw, body: errBody } = await readUpstreamError(upstreamRes)
-    logger.warn({ status, raw, origin: cfg.origin }, "openai-format upstream error")
+    logger.warn({ status, raw }, "openai-format upstream error")
     return res.status(status).json(errBody)
   }
   const json = await readUpstreamJson(upstreamRes)
@@ -115,26 +95,21 @@ async function forwardAnthropicAsOpenAI(
   body: OpenAIChatRequest,
   wantStream: boolean,
   res: Response,
-  cfg: UpstreamConfig,
+  chain: UpstreamConfig[],
 ) {
   const anthropicReq = openaiToAnthropicRequest(body)
   anthropicReq.stream = wantStream
-  const url = `${cfg.baseUrl}/v1/messages`
-  const init: RequestInit = {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify(anthropicReq),
-  }
+  const candidates = buildAnthropicCandidates(anthropicReq, chain, "anthropic")
 
   if (wantStream) {
-    const upstreamRes = await acquireStreamingUpstream(res, url, init, "openai")
+    const upstreamRes = await acquireStreamingUpstream(res, candidates, "openai")
     if (!upstreamRes) return
     res.on("close", () => safeCancel(upstreamRes.body))
     await pipeAnthropicStreamToOpenai(upstreamRes.body!, res, body.model)
     return
   }
 
-  const upstreamRes = await acquireUpstream(url, init)
+  const upstreamRes = await acquireUpstream(candidates)
   if (!upstreamRes.ok || !upstreamRes.body) {
     const { status, raw, body: errBody } = await readUpstreamError(upstreamRes)
     logger.warn({ status, raw }, "anthropic upstream error (chat conversion)")

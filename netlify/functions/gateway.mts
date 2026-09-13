@@ -12,16 +12,23 @@ import { buildHealth } from "../../api/_lib/health.js"
 import { listModels, debugEnabled } from "../../api/_lib/models.js"
 import { handleChatCompletions } from "../../api/_lib/routes/chat-completions.js"
 import { handleMessages } from "../../api/_lib/routes/messages.js"
-import { handleOpenAIPassthrough } from "../../api/_lib/routes/passthrough.js"
+import { handleOpenAIPassthrough, handleAnthropicPassthrough } from "../../api/_lib/routes/passthrough.js"
 import { redactErrorMessage } from "../../api/_lib/redact.js"
 import { UpstreamUnreachableError } from "../../api/_lib/upstream.js"
 import { runDiag } from "../../api/_lib/diag.js"
+import { logger } from "../../api/_lib/logger.js"
 
 export default async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url)
   const pathname = url.pathname
   const debug = debugEnabled() && (url.searchParams.get("debug") === "1" || url.searchParams.get("debug") === "true")
   const res = new WebResShim(request.signal)
+
+  // Request log — mirrors the Express middleware (method, path, status, ms).
+  const t0 = Date.now()
+  res.on("finish", () => {
+    logger.info({ method: request.method, path: pathname, status: res.statusCode, ms: Date.now() - t0 }, "request")
+  })
 
   // CORS — mirrors the Express `cors({ origin: true })` middleware.
   res.setHeader("access-control-allow-origin", request.headers.get("origin") ?? "*")
@@ -62,64 +69,72 @@ export default async function handler(request: Request): Promise<Response> {
 
   // ----- routing (shares the same handlers as api/_lib/app.ts) -----
   async function dispatch(path: string, method: string, r: ExpressRequest, w: WebResShim) {
+    const authed = () => {
+      if (isAuthorized((n) => r.header(n) ?? undefined)) return true
+      w.status(401).json(UNAUTHORIZED_BODY)
+      return false
+    }
+
     if ((path === "/api/healthz" || path === "/healthz") && method === "GET") {
       w.json(buildHealth({}))
       return
     }
 
+    // Claude Code telemetry sink — must never error; auth-free 200 no-op.
+    if (path === "/api/event_logging/batch") {
+      w.status(200).json({})
+      return
+    }
+
     if (path === "/v1/models" && method === "GET") {
-      if (!isAuthorized((n) => r.header(n) ?? undefined)) {
-        w.status(401).json(UNAUTHORIZED_BODY)
-        return
-      }
+      if (!authed()) return
       const ml = await listModels({}, { debug })
       w.json({ object: "list", data: ml.data, ...(ml._debug ? { _debug: ml._debug } : {}) })
       return
     }
 
     if (path === "/v1/diag" && method === "GET") {
-      if (!isAuthorized((n) => r.header(n) ?? undefined)) {
-        w.status(401).json(UNAUTHORIZED_BODY)
-        return
-      }
+      if (!authed()) return
       w.json(await runDiag({}, Object.fromEntries(url.searchParams)))
       return
     }
 
     if (path === "/v1/alpha/search") {
-      if (!isAuthorized((n) => r.header(n) ?? undefined)) {
-        w.status(401).json(UNAUTHORIZED_BODY)
-        return
-      }
+      if (!authed()) return
       await handleOpenAIPassthrough(r, xres, "/alpha/search")
       return
     }
 
     // Codex tries wss://…/v1/responses first (Netlify can't upgrade → the client
-    // falls back to this HTTP+SSE POST). Any method is forwarded verbatim.
-    if (path === "/v1/responses") {
-      if (!isAuthorized((n) => r.header(n) ?? undefined)) {
-        w.status(401).json(UNAUTHORIZED_BODY)
-        return
-      }
-      await handleOpenAIPassthrough(r, xres, "/responses")
+    // falls back to this HTTP+SSE POST). Subpaths (/responses/{id}/cancel,
+    // /responses/compact, …) forward verbatim too.
+    if (path === "/v1/responses" || path.startsWith("/v1/responses/")) {
+      if (!authed()) return
+      await handleOpenAIPassthrough(r, xres, path.slice("/v1".length))
+      return
+    }
+
+    if (path === "/v1/embeddings") {
+      if (!authed()) return
+      await handleOpenAIPassthrough(r, xres, "/embeddings")
       return
     }
 
     if (path === "/v1/chat/completions" && method === "POST") {
-      if (!isAuthorized((n) => r.header(n) ?? undefined)) {
-        w.status(401).json(UNAUTHORIZED_BODY)
-        return
-      }
+      if (!authed()) return
       await handleChatCompletions(r, xres)
       return
     }
 
+    // Claude Code pre-flight token counting — Anthropic-native passthrough.
+    if (path === "/v1/messages/count_tokens" && method === "POST") {
+      if (!authed()) return
+      await handleAnthropicPassthrough(r, xres, "/v1/messages/count_tokens")
+      return
+    }
+
     if (path === "/v1/messages" && method === "POST") {
-      if (!isAuthorized((n) => r.header(n) ?? undefined)) {
-        w.status(401).json(UNAUTHORIZED_BODY)
-        return
-      }
+      if (!authed()) return
       await handleMessages(r, xres)
       return
     }
@@ -129,5 +144,19 @@ export default async function handler(request: Request): Promise<Response> {
 }
 
 export const config = {
-  path: ["/api/healthz", "/healthz", "/v1", "/v1/models", "/v1/diag", "/v1/alpha/search", "/v1/responses", "/v1/chat/completions", "/v1/messages"],
+  path: [
+    "/api/healthz",
+    "/healthz",
+    "/api/event_logging/batch",
+    "/v1",
+    "/v1/models",
+    "/v1/diag",
+    "/v1/alpha/search",
+    "/v1/responses",
+    "/v1/responses/*",
+    "/v1/embeddings",
+    "/v1/chat/completions",
+    "/v1/messages",
+    "/v1/messages/count_tokens",
+  ],
 }

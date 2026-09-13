@@ -6,7 +6,7 @@ import { listModels, debugEnabled } from "./models.js"
 import { buildHealth } from "./health.js"
 import { handleChatCompletions } from "./routes/chat-completions.js"
 import { handleMessages } from "./routes/messages.js"
-import { handleOpenAIPassthrough } from "./routes/passthrough.js"
+import { handleOpenAIPassthrough, handleAnthropicPassthrough } from "./routes/passthrough.js"
 import { readOidcToken, UpstreamUnreachableError } from "./upstream.js"
 import { redactErrorMessage } from "./redact.js"
 import { runDiag } from "./diag.js"
@@ -53,6 +53,11 @@ export function createApp() {
     Promise.resolve(handleMessages(req, res)).catch(next)
   })
 
+  // Claude Code calls this before requests — forward to the Anthropic upstream.
+  app.post("/v1/messages/count_tokens", bearerAuth, (req, res, next) => {
+    Promise.resolve(handleAnthropicPassthrough(req, res, "/v1/messages/count_tokens")).catch(next)
+  })
+
   // ----- OpenAI passthrough for extra endpoints (search, responses, …) -----
   // NOTE: `/v1/responses` here is the HTTP+SSE transport. Codex tries a
   // `wss://` upgrade first, which Netlify cannot serve; it then falls back to
@@ -61,8 +66,18 @@ export function createApp() {
     Promise.resolve(handleOpenAIPassthrough(req, res, "/alpha/search")).catch(next)
   })
 
-  app.all("/v1/responses", bearerAuth, (req, res, next) => {
-    Promise.resolve(handleOpenAIPassthrough(req, res, "/responses")).catch(next)
+  app.all(["/v1/responses", "/v1/responses/*splat"], bearerAuth, (req, res, next) => {
+    const sub = req.path.startsWith("/v1/") ? req.path.slice("/v1".length) : req.path
+    Promise.resolve(handleOpenAIPassthrough(req, res, sub)).catch(next)
+  })
+
+  app.all("/v1/embeddings", bearerAuth, (req, res, next) => {
+    Promise.resolve(handleOpenAIPassthrough(req, res, "/embeddings")).catch(next)
+  })
+
+  // Claude Code telemetry sink — must never error; auth-free 200 no-op.
+  app.post("/api/event_logging/batch", (_req, res) => {
+    res.status(200).json({})
   })
 
   // ----- on-demand upstream diagnostics (auth-gated; masks host) -----
