@@ -99,23 +99,52 @@ async function proxyRaw(
     res.end()
     return
   }
+  const isSse = (ct ?? "").includes("text/event-stream")
   const reader = upstreamRes.body.getReader()
   res.on("close", () => safeCancel(reader))
   const stallMs = stallTimeoutMs()
+  const t0 = Date.now()
+  let sawTerminal = false // Responses stream reached a terminal event
+  let abnormal = false // stall / mid-stream throw — stream did not end cleanly
+  const decoder = new TextDecoder()
   try {
     for (;;) {
       const result = await readWithStall(reader, stallMs)
       if (result === "stall") {
-        logger.warn({ subpath }, "passthrough stream stalled — aborting")
+        logger.warn({ subpath, ms: Date.now() - t0 }, "passthrough stream stalled — aborting")
         safeCancel(reader)
+        abnormal = true
         break
       }
       if (result.done) break
-      if (result.value) res.write(Buffer.from(result.value))
+      if (result.value) {
+        if (isSse && !sawTerminal) {
+          const text = decoder.decode(result.value, { stream: true })
+          // Responses terminal events; `[DONE]` covers the chat/completions shape.
+          if (/response\.(completed|incomplete|failed)|message_stop|\[DONE\]/.test(text)) sawTerminal = true
+        }
+        res.write(Buffer.from(result.value))
+      }
     }
   } catch (err) {
-    logger.error({ err, subpath }, `${which} passthrough stream error`)
+    logger.error({ err, subpath, ms: Date.now() - t0 }, `${which} passthrough stream error`)
+    abnormal = true
   } finally {
+    // If a Responses SSE stream ended WITHOUT a terminal event (upstream/Netlify
+    // cut it mid-stream), synthesize `response.failed` so the client sees a clean,
+    // parseable end instead of a bare EOF ("stream closed before response.completed").
+    if (isSse && !sawTerminal && !res.writableEnded) {
+      logger.warn({ subpath, ms: Date.now() - t0, abnormal }, "responses stream ended without terminal event — synthesizing response.failed")
+      const evt = {
+        type: "response.failed",
+        response: { status: "failed", error: { code: "upstream_incomplete", message: "upstream stream closed before completion" } },
+      }
+      try {
+        res.write(`event: response.failed\ndata: ${JSON.stringify(evt)}\n\n`)
+      } catch {
+        /* ignore */
+      }
+    }
     if (!res.writableEnded) res.end()
   }
 }
