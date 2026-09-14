@@ -95,7 +95,9 @@ function resolveGateway(ctx: UpstreamCtx): { baseUrl: string; apiKey: string; or
     return { baseUrl: VERCEL_GATEWAY_BASE, apiKey: vercelKey, origin: "vercel-ai-gateway" }
   }
   const netlifyKey = process.env.NETLIFY_AI_GATEWAY_KEY
-  const netlifyBase = process.env.NETLIFY_AI_GATEWAY_BASE_URL
+  // Netlify injects the gateway URL as NETLIFY_AI_GATEWAY_URL (the docs' name);
+  // accept the older *_BASE_URL too for safety.
+  const netlifyBase = process.env.NETLIFY_AI_GATEWAY_URL ?? process.env.NETLIFY_AI_GATEWAY_BASE_URL
   if (netlifyKey && netlifyBase) {
     return { baseUrl: trimSlash(netlifyBase), apiKey: netlifyKey, origin: "netlify-ai-gateway" }
   }
@@ -230,6 +232,23 @@ export function sanitizeAnthropicBody<T extends Record<string, unknown>>(body: T
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529])
 /** Cap any single backoff so retries can't blow the serverless function's time limit. */
 const MAX_RETRY_WAIT_MS = 2000
+
+/**
+ * How many times to retry a 403 before forwarding it. A 403 is usually a hard
+ * error, BUT some gateways (notably the Netlify AI Gateway under bursty load)
+ * return 403 from a short-lived account protection window that clears in a
+ * couple seconds. Retrying a bounded number of times with backoff absorbs those
+ * without masking a genuinely-forbidden request for long. Env `RETRY_403_MAX`
+ * (default 2; 0 disables). */
+function retry403Max(): number {
+  const v = Number(process.env.RETRY_403_MAX)
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 2
+}
+
+/** Is a 403 currently eligible for another retry given how many we've done? */
+function shouldRetry403(status: number, forbiddenHits: number): boolean {
+  return status === 403 && forbiddenHits <= retry403Max()
+}
 /** Abort a request that hasn't produced RESPONSE HEADERS within this window and
  * retry it — turns a hung gateway→provider connection into a fast retry instead
  * of a request that hangs until the function times out. Cleared the moment
@@ -253,6 +272,10 @@ function backoffMs(res: Response, attempt: number): number {
       if (!Number.isNaN(when)) return Math.min(Math.max(0, when - Date.now()), MAX_RETRY_WAIT_MS)
     }
     return Math.min(500 * (attempt + 1) + jitter, MAX_RETRY_WAIT_MS)
+  }
+  if (res.status === 403) {
+    // A protection-window 403 needs a beat to clear; back off a bit harder.
+    return Math.min(800 * (attempt + 1) + jitter, 2500)
   }
   return Math.min(300 * (attempt + 1) + jitter, MAX_RETRY_WAIT_MS)
 }
@@ -284,6 +307,7 @@ export class UpstreamUnreachableError extends Error {
 export async function fetchUpstream(url: string, init: RequestInit, retries = 4): Promise<Response> {
   const host = hostOf(url)
   let lastErr: unknown
+  let forbiddenHits = 0
   for (let attempt = 0; ; attempt++) {
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), RESPONSE_TIMEOUT_MS)
@@ -296,6 +320,13 @@ export async function fetchUpstream(url: string, init: RequestInit, retries = 4)
       if (RETRYABLE_STATUS.has(res.status) && attempt < retries) {
         logger.warn({ host, status: res.status, attempt, ms: Date.now() - t0 }, "upstream retryable status")
         await delay(backoffMs(res, attempt))
+        continue
+      }
+      // Bounded retry for a protection-window 403 (see retry403Max()).
+      if (res.status === 403 && shouldRetry403(res.status, ++forbiddenHits)) {
+        logger.warn({ host, status: 403, hit: forbiddenHits, ms: Date.now() - t0 }, "upstream 403 — retrying")
+        void res.body?.cancel().catch(() => {})
+        await delay(backoffMs(res, forbiddenHits - 1))
         continue
       }
       return res
@@ -349,8 +380,9 @@ export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlin
   let lastError: string | undefined
   let attempts = 0
   let rateLimitHits = 0
-  // Last retryable HTTP response (429/5xx) kept so we can forward it on give-up
-  // instead of throwing a generic 502. Only network throws leave this null.
+  let forbiddenHits = 0
+  // Last retryable HTTP response (429/5xx/403) kept so we can forward it on
+  // give-up instead of throwing a generic 502. Only network throws leave null.
   let lastRetryableRes: Response | null = null
   const supersede = (res: Response | null) => {
     if (lastRetryableRes && lastRetryableRes !== res) {
@@ -371,7 +403,20 @@ export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlin
       const res = await upstreamFetch(url, { ...init, signal: ac.signal })
       clearTimeout(timer)
       if (res.ok && res.body) return { res, attempts, elapsedMs: Date.now() - start }
-      if (!RETRYABLE_STATUS.has(res.status)) return { res, attempts, elapsedMs: Date.now() - start } // 4xx → forward
+      // Protection-window 403: retry a bounded number of times, else forward it.
+      if (res.status === 403) {
+        if (!shouldRetry403(res.status, ++forbiddenHits)) {
+          supersede(res)
+          return { res: lastRetryableRes, attempts, elapsedMs: Date.now() - start, lastError: "status 403" }
+        }
+        lastError = "status 403"
+        logger.warn({ host, status: 403, hit: forbiddenHits, ms: Date.now() - t0 }, "upstream 403 — retrying")
+        supersede(res)
+        if (Date.now() - start >= deadlineMs) return { res: lastRetryableRes, attempts, elapsedMs: Date.now() - start, lastError }
+        await delay(backoffMs(res, forbiddenHits - 1))
+        continue
+      }
+      if (!RETRYABLE_STATUS.has(res.status)) return { res, attempts, elapsedMs: Date.now() - start } // other 4xx → forward
       lastError = `status ${res.status}`
       logger.warn({ host, status: res.status, attempt, ms: Date.now() - t0 }, "upstream retryable status")
       supersede(res)
