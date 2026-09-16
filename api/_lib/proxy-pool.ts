@@ -4,10 +4,16 @@ import { logger } from "./logger.js"
 /**
  * Optional multi-IP egress. When `UPSTREAM_PROXIES` is set, upstream requests are
  * rotated (round-robin) across a pool of HTTP proxies so the upstream sees many
- * source IPs — useful ONLY when the upstream rate-limits / abuse-detects by
- * source IP (e.g. a self-hosted deployment pointed at a direct distributor).
- * It does NOT help an account-keyed gateway like the Netlify AI Gateway, whose
- * limit follows the API key regardless of source IP.
+ * source IPs — useful when the upstream rate-limits / abuse-detects by source IP.
+ *
+ * By default Netlify self-gateway hosts (`*.netlify.app` / `/.netlify/ai`) are
+ * NOT proxied: the gateway is account-keyed, so a proxy can't change an
+ * account-level 403/429. BUT Netlify's EDGE also connection-throttles a single
+ * datacenter IP under sustained load (TCP handshake ok, TLS/HTTP then stalls) —
+ * that IS a source-IP problem, and rotating proxies dodges it. Set
+ * `PROXY_NETLIFY_TARGETS=1` (e.g. on a VPS whose IP got edge-throttled) to route
+ * the netlify hop through the pool too. Leave unset on the hosted Netlify sites,
+ * where proxies aren't present and the call is effectively same-origin.
  *
  * `UPSTREAM_PROXIES` format: one proxy per line or comma-separated, either
  *   host:port:user:pass   (the pipe-list format, `:`-joined)
@@ -103,7 +109,9 @@ export function pickDispatcher(targetUrl: string): { dispatcher: Dispatcher; lab
   } catch {
     /* ignore */
   }
-  if (/\.netlify\.app$/i.test(host) || targetUrl.includes("/.netlify/ai")) {
+  const isNetlify = /\.netlify\.app$/i.test(host) || targetUrl.includes("/.netlify/ai")
+  const proxyNetlify = process.env.PROXY_NETLIFY_TARGETS === "1" || process.env.PROXY_NETLIFY_TARGETS === "true"
+  if (isNetlify && !proxyNetlify) {
     return { dispatcher: directDispatcher, label: "direct(netlify)" }
   }
 
