@@ -74,6 +74,11 @@ export default async function handler(req: Request): Promise<Response> {
   }
 
   const model = url.searchParams.get("model") ?? "gpt-6-astra"
+  // gpt-5+/o-series reject `max_tokens`; use max_completion_tokens for them.
+  const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model
+  const gptGen = /^gpt-(\d+)/i.exec(bare)
+  const reasoning = (gptGen && Number(gptGen[1]) >= 5) || /^o[0-9]/i.test(bare)
+  const tokenField = reasoning ? "max_completion_tokens" : "max_tokens"
   const started = Date.now()
   const upstream = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: "POST",
@@ -81,7 +86,7 @@ export default async function handler(req: Request): Promise<Response> {
     body: JSON.stringify({
       model,
       stream: true,
-      max_tokens: 8000,
+      [tokenField]: 8000,
       messages: [
         { role: "user", content: "画一只骑自行车的鹈鹕，做成带动画的 SVG（车轮转动、脚踏联动）。给出完整可运行的 SVG 代码，并逐段解释。" },
       ],
