@@ -304,13 +304,18 @@ export class UpstreamUnreachableError extends Error {
  * other than 429 (bad model, auth, invalid request) is NOT retried. Only use
  * this for the first request; never retry once a stream has started.
  */
-export async function fetchUpstream(url: string, init: RequestInit, retries = 4): Promise<Response> {
+export async function fetchUpstream(
+  url: string,
+  init: RequestInit,
+  retries = 4,
+  firstByteMs = RESPONSE_TIMEOUT_MS,
+): Promise<Response> {
   const host = hostOf(url)
   let lastErr: unknown
   let forbiddenHits = 0
   for (let attempt = 0; ; attempt++) {
     const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), RESPONSE_TIMEOUT_MS)
+    const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), firstByteMs)
     const t0 = Date.now()
     try {
       const res = await upstreamFetch(url, { ...init, signal: ac.signal })
@@ -374,7 +379,12 @@ export interface RideOutResult {
  * the whole deadline and returning a less-actionable 502. */
 const MAX_429_RETRIES = 2
 
-export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlineMs: number): Promise<RideOutResult> {
+export async function fetchUpstreamUntil(
+  url: string,
+  init: RequestInit,
+  deadlineMs: number,
+  firstByteMs = RESPONSE_TIMEOUT_MS,
+): Promise<RideOutResult> {
   const host = hostOf(url)
   const start = Date.now()
   let lastError: string | undefined
@@ -397,7 +407,7 @@ export async function fetchUpstreamUntil(url: string, init: RequestInit, deadlin
   for (let attempt = 0; ; attempt++) {
     attempts = attempt + 1
     const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), RESPONSE_TIMEOUT_MS)
+    const timer = setTimeout(() => ac.abort(new Error("upstream response timeout")), firstByteMs)
     const t0 = Date.now()
     try {
       const res = await upstreamFetch(url, { ...init, signal: ac.signal })

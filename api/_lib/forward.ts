@@ -3,7 +3,6 @@ import {
   fetchUpstream,
   fetchUpstreamUntil,
   readUpstreamError,
-  isRetryableStatus,
   sanitizeAnthropicBody,
   UpstreamUnreachableError,
   type UpstreamConfig,
@@ -90,15 +89,6 @@ export function buildAnthropicCandidates(
 // below it so we return a clean error rather than getting killed mid-response,
 // leaving headroom for the eventual successful upstream call to actually run.
 
-/** How long a streaming request keeps retrying a transiently-failing upstream
- * (behind an already-open SSE heartbeat) before giving up. Waiting counts against
- * the function budget, so leave room for the stream itself. Override with
- * UPSTREAM_STREAM_RETRY_MS. */
-function streamDeadlineMs(): number {
-  const v = Number(process.env.UPSTREAM_STREAM_RETRY_MS)
-  return Number.isFinite(v) && v > 0 ? v : 20_000
-}
-
 /** How long a NON-streaming request rides out a transiently-failing upstream
  * before returning 502. Nothing reaches the client until the whole call returns,
  * so this + the successful call must fit the ~30s function timeout. Override with
@@ -106,6 +96,27 @@ function streamDeadlineMs(): number {
 function nonStreamDeadlineMs(): number {
   const v = Number(process.env.UPSTREAM_NONSTREAM_RETRY_MS)
   return Number.isFinite(v) && v > 0 ? v : 18_000
+}
+
+/** If the upstream hasn't returned response headers within this window, open the
+ * client SSE stream + heartbeat anyway. Reasoning models (gpt-6-astra, o-series)
+ * can spend 20-40s "thinking" before the first token, during which the upstream
+ * withholds headers — if we send the client NOTHING, a hosting edge (Netlify)
+ * returns its own ~30s 504 → the empty-reply we saw on the SVG task. Flushing a
+ * heartbeat early keeps the connection in streaming mode. Override with
+ * STREAM_HEADERS_GRACE_MS. */
+function streamHeadersGraceMs(): number {
+  const v = Number(process.env.STREAM_HEADERS_GRACE_MS)
+  return Number.isFinite(v) && v > 0 ? v : 8_000
+}
+
+/** First-byte timeout for a STREAMING upstream fetch. Larger than the default 30s
+ * so a reasoning model's long pre-first-token pause isn't aborted early — but
+ * still under the hosting streaming wall (~60s). Override with
+ * STREAM_FIRST_BYTE_MS. */
+function streamFirstByteMs(): number {
+  const v = Number(process.env.STREAM_FIRST_BYTE_MS)
+  return Number.isFinite(v) && v > 0 ? v : 55_000
 }
 
 /**
@@ -201,77 +212,77 @@ export async function acquireStreamingUpstream(
 ): Promise<Response | null> {
   const t0 = Date.now()
 
-  // ---- phase 1: quick attempts, headers not sent yet ----
-  let lastFailure: Response | null = null
-  for (let i = 0; i < candidates.length; i++) {
-    const c = candidates[i]
-    let quick: Response | null = null
-    try {
-      quick = await fetchUpstream(c.url, c.init, i === 0 ? 2 : 1)
-    } catch {
-      quick = null // network-unreachable → next candidate / phase 2
-    }
-    if (quick && quick.ok && quick.body) {
-      setSseHeaders(res)
-      startKeepalive(res, format)
-      logger.info({ origin: c.origin, upstreamHeadersMs: Date.now() - t0, candidate: i }, "stream upstream acquired")
-      supersedeFailure(lastFailure, quick)
-      return quick
-    }
-    if (quick && !quick.ok) {
-      if (!isFailoverStatus(quick.status)) {
-        // Genuine request error — preserve the real status; no stream.
-        supersedeFailure(lastFailure, quick)
-        const { status, body } = await readUpstreamError(quick)
+  // Open the client SSE stream + heartbeat idempotently. Once opened we can no
+  // longer send a real HTTP status, so failures become in-band SSE error events.
+  let opened = false
+  const openStream = (immediateHeartbeat = false) => {
+    if (opened) return
+    opened = true
+    setSseHeaders(res)
+    startKeepalive(res, format, 5000, immediateHeartbeat)
+  }
+  // Safety net: if the upstream is slow to first byte (reasoning models withhold
+  // headers 20-40s), flush the stream+heartbeat before the hosting edge's ~30s
+  // no-response 504 fires. The immediate heartbeat guarantees a byte goes out now.
+  const graceTimer = setTimeout(() => {
+    logger.info({ ms: Date.now() - t0 }, "stream headers grace elapsed — opening stream early")
+    openStream(true)
+  }, streamHeadersGraceMs())
+
+  const finishError = async (failure: Response | null, fallbackMsg: string) => {
+    let message = fallbackMsg
+    if (failure) {
+      const { status, body } = await readUpstreamError(failure)
+      // Not yet opened → we can still forward the real HTTP status cleanly.
+      if (!opened) {
         res.status(status).json(body)
         return null
       }
-      logger.warn({ origin: c.origin, status: quick.status }, "stream quick attempt failing over")
-      supersedeFailure(lastFailure, quick)
-      lastFailure = quick
+      message = body.error.message
     }
-  }
-
-  // A definitive failure (429/auth/404) from the chain and headers not sent yet:
-  // forward the real status rather than burying it in an SSE error. Only true
-  // transients (5xx / network) proceed to the ride-out phase.
-  if (lastFailure && (lastFailure.status === 429 || !isRetryableStatus(lastFailure.status))) {
-    const { status, body } = await readUpstreamError(lastFailure)
-    res.status(status).json(body)
+    openStream()
+    emitStreamError(res, format, message)
+    if (!res.writableEnded) res.end()
     return null
   }
-  supersedeFailure(lastFailure, null)
 
-  // ---- phase 2: transient failure — open the stream + heartbeat, then ride it out ----
-  setSseHeaders(res)
-  startKeepalive(res, format)
-  const deadline = Date.now() + streamDeadlineMs()
-  let lastError: string | undefined
-  let lastRes: Response | null = null
-  for (let i = 0; i < candidates.length; i++) {
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) break
-    const slice = Math.max(2_000, Math.floor(remaining / (candidates.length - i)))
-    const c = candidates[i]
-    const { res: good, lastError: err } = await fetchUpstreamUntil(c.url, c.init, Math.min(slice, remaining))
-    if (err) lastError = err
-    if (good && good.ok && good.body) {
-      logger.info({ origin: c.origin, upstreamHeadersMs: Date.now() - t0, candidate: i, phase: 2 }, "stream upstream acquired")
-      supersedeFailure(lastRes, good)
-      return good
+  try {
+    const fbMs = streamFirstByteMs()
+    let lastFailure: Response | null = null
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i]
+      let r: Response | null = null
+      try {
+        r = await fetchUpstream(c.url, c.init, i === 0 ? 1 : 0, fbMs)
+      } catch {
+        r = null // network-unreachable → next candidate / error out
+      }
+      if (r && r.ok && r.body) {
+        clearTimeout(graceTimer)
+        openStream()
+        logger.info({ origin: c.origin, upstreamHeadersMs: Date.now() - t0, candidate: i, openedEarly: opened }, "stream upstream acquired")
+        supersedeFailure(lastFailure, r)
+        return r
+      }
+      if (r && !r.ok) {
+        if (!isFailoverStatus(r.status)) {
+          // Genuine request error (bad model / 400). Forward real status if we
+          // haven't opened yet; otherwise surface as an SSE error.
+          clearTimeout(graceTimer)
+          supersedeFailure(lastFailure, r)
+          return finishError(r, "")
+        }
+        logger.warn({ origin: c.origin, status: r.status }, "stream attempt failing over")
+        supersedeFailure(lastFailure, r)
+        lastFailure = r
+      }
     }
-    supersedeFailure(lastRes, good)
-    lastRes = good
-  }
 
-  let message = `upstream temporarily unavailable: ${lastError ?? "fetch failed"}`
-  if (lastRes) {
-    const { body } = await readUpstreamError(lastRes)
-    message = body.error.message
+    clearTimeout(graceTimer)
+    return finishError(lastFailure, `upstream temporarily unavailable: fetch failed`)
+  } finally {
+    clearTimeout(graceTimer)
   }
-  emitStreamError(res, format, message)
-  if (!res.writableEnded) res.end()
-  return null
 }
 
 /** Emit a terminal stream error in the client's own SSE dialect. */

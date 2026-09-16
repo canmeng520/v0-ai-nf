@@ -24,8 +24,18 @@ function heartbeatPayload(format: StreamFormat): string {
   return format === "anthropic" ? `event: ping\ndata: {"type": "ping"}\n\n` : `: keepalive\n\n`
 }
 
-export function startKeepalive(res: Response, format: StreamFormat = "openai", intervalMs = 5000) {
+export function startKeepalive(res: Response, format: StreamFormat = "openai", intervalMs = 5000, immediate = false) {
   const payload = heartbeatPayload(format)
+  // Flush one heartbeat right away when asked — guarantees a body byte reaches
+  // the hosting edge the instant we open the stream (before any upstream data),
+  // so an idle-stream watchdog can't cut a reasoning model's long first-token pause.
+  if (immediate) {
+    try {
+      res.write(payload)
+    } catch {
+      // ignore
+    }
+  }
 
   // Suppress heartbeats while real data is flowing (sub2api's pattern): wrap
   // res.write once so every write stamps lastWrite, and only ping when the
