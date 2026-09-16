@@ -89,7 +89,13 @@ async function proxyRaw(
     bodyStr = JSON.stringify(req.body ?? {})
   }
 
-  const upstreamRes = await fetchUpstream(url, { method, headers, body: bodyStr })
+  // Reasoning models (Codex on /v1/responses, o-series) can take well over the
+  // default 30s first-byte window to emit their first token. Self-host has no
+  // ~60s wall, so allow a generous first-byte timeout here; PASSTHROUGH_FIRST_BYTE_MS
+  // overrides (default 120s). Keep retries low so a genuine hang fails fast.
+  const fbEnv = Number(process.env.PASSTHROUGH_FIRST_BYTE_MS)
+  const firstByteMs = Number.isFinite(fbEnv) && fbEnv > 0 ? fbEnv : 120_000
+  const upstreamRes = await fetchUpstream(url, { method, headers, body: bodyStr }, 1, firstByteMs)
 
   // Pass status + content-type through; stream the body raw (handles JSON & SSE).
   res.status(upstreamRes.status)
