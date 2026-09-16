@@ -20,3 +20,10 @@
   # pino uses dynamic requires that don't bundle cleanly; undici ships wasm
   # assets esbuild can't inline. Let the runtime load both from node_modules.
   external_node_modules = ["pino", "undici"]
+
+# Edge Functions (Deno) — used for streaming that must run past the 60s
+# serverless wall. Each declares its own `config.path`; listed here explicitly
+# so the binding is unambiguous. STAGE 0: /edge/probe is a throwaway go/no-go.
+[[edge_functions]]
+  path = "/edge/probe"
+  function = "gw-probe"
