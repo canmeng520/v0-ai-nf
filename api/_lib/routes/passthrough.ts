@@ -95,7 +95,10 @@ async function proxyRaw(
   // overrides (default 120s). Keep retries low so a genuine hang fails fast.
   const fbEnv = Number(process.env.PASSTHROUGH_FIRST_BYTE_MS)
   const firstByteMs = Number.isFinite(fbEnv) && fbEnv > 0 ? fbEnv : 120_000
-  const upstreamRes = await fetchUpstream(url, { method, headers, body: bodyStr }, 1, firstByteMs)
+  // retries=3: a proxy ECONNRESET before the first byte is safe to retry and
+  // recovers instantly; a genuine slow first byte doesn't retry (it succeeds
+  // within firstByteMs), so this rarely adds latency.
+  const upstreamRes = await fetchUpstream(url, { method, headers, body: bodyStr }, 3, firstByteMs)
 
   // Pass status + content-type through; stream the body raw (handles JSON & SSE).
   res.status(upstreamRes.status)
