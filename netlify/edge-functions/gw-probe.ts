@@ -58,6 +58,31 @@ export default async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url)
   const cors = { "access-control-allow-origin": "*" }
 
+  // Self-test: stream a heartbeat every 2s for 90s with NO upstream call. If this
+  // survives past 60s, the edge runtime itself does NOT cap us → any 60s cut on
+  // ?run=1 is the upstream Netlify AI Gateway. If this also dies at ~60s, the cap
+  // is the edge runtime.
+  if (url.searchParams.get("selftest") === "1") {
+    const enc = new TextEncoder()
+    const start = Date.now()
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(enc.encode(`: start\n\n`))
+        for (let i = 0; i < 45; i++) {
+          await new Promise((r) => setTimeout(r, 2000))
+          const t = Date.now() - start
+          controller.enqueue(enc.encode(`data: ${JSON.stringify({ tick: i, ms: t })}\n\n`))
+          if (t > 88000) break
+        }
+        controller.enqueue(enc.encode(`event: selftest\ndata: ${JSON.stringify({ done: true, totalMs: Date.now() - start })}\n\n`))
+        controller.close()
+      },
+    })
+    return new Response(stream, {
+      headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", ...cors },
+    })
+  }
+
   if (url.searchParams.get("run") !== "1") {
     return new Response(
       JSON.stringify({ ok: true, runtime: "edge", env: presentEnv(), resolved: Boolean(resolveOpenAI()) }, null, 2),
