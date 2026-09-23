@@ -17,6 +17,11 @@ export interface ModelInfo {
  */
 export const FALLBACK_MODELS: ModelInfo[] = [
   // OpenAI
+  { id: "gpt-6-astra", provider: "openai", context_window: 400_000 },
+  { id: "gpt-6-luna", provider: "openai", context_window: 400_000 },
+  { id: "gpt-6-sol", provider: "openai", context_window: 400_000 },
+  { id: "gpt-5.6-terra", provider: "openai", context_window: 400_000 },
+  { id: "gpt-5.6-sol", provider: "openai", context_window: 400_000 },
   { id: "gpt-5.5", provider: "openai", context_window: 400_000 },
   { id: "gpt-5.4", provider: "openai", context_window: 400_000 },
   { id: "gpt-5.4-mini", provider: "openai", context_window: 400_000 },
@@ -53,6 +58,26 @@ const NETLIFY_DIRECT_ANTHROPIC = [
   "claude-sonnet-4-5-20250929",
   "claude-sonnet-4-6",
   "claude-sonnet-5",
+]
+
+/**
+ * OpenAI (GPT) models the Netlify AI Gateway serves directly but does NOT expose
+ * via its `/v1/models` endpoint (that returns only third-party providers). We add
+ * these when an OpenAI upstream is configured on Netlify yet the live probe
+ * returns no OpenAI ids — same supplement pattern as NETLIFY_DIRECT_ANTHROPIC.
+ * Update as OpenAI adds/removes models.
+ */
+const NETLIFY_DIRECT_OPENAI = [
+  "gpt-6-astra",
+  "gpt-6-luna",
+  "gpt-6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-sol",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "o3",
 ]
 
 /** Known gateway/provider path prefixes emitted by unified gateways (e.g. Vercel
@@ -312,7 +337,7 @@ function buildSources(ctx: UpstreamCtx): Source[] {
  */
 export async function fetchUpstreamModels(
   ctx: UpstreamCtx = {},
-): Promise<{ models: ModelInfo[]; probes: ProbeDiag[]; supplementedAnthropic: number }> {
+): Promise<{ models: ModelInfo[]; probes: ProbeDiag[]; supplementedAnthropic: number; supplementedOpenAI: number }> {
   const sources = buildSources(ctx)
   const probedUrls = new Set<string>()
 
@@ -365,7 +390,22 @@ export async function fetchUpstreamModels(
     }
   }
 
-  return { models, probes, supplementedAnthropic }
+  // Same for OpenAI: the Netlify gateway serves GPT but its list endpoint omits
+  // them, so supplement from the curated set when an OpenAI upstream is configured
+  // yet no OpenAI ids came back live.
+  const hasOpenAISource = sources.some((s) => s.name === "openai")
+  const openaiLive = models.some((m) => m.provider === "openai")
+  let supplementedOpenAI = 0
+  if (hasOpenAISource && !openaiLive && isNetlifyGateway) {
+    for (const id of NETLIFY_DIRECT_OPENAI) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      models.push({ id, provider: "openai", context_window: FALLBACK_MAP.get(id)?.context_window ?? 400_000 })
+      supplementedOpenAI++
+    }
+  }
+
+  return { models, probes, supplementedAnthropic, supplementedOpenAI }
 }
 
 /**
@@ -407,7 +447,7 @@ export function envDiag(ctx: UpstreamCtx) {
  * present, so an incomplete list can be diagnosed against the real upstream.
  */
 export async function listModels(ctx: UpstreamCtx = {}, opts: { debug?: boolean } = {}) {
-  const { models: fetched, probes, supplementedAnthropic } = await fetchUpstreamModels(ctx)
+  const { models: fetched, probes, supplementedAnthropic, supplementedOpenAI } = await fetchUpstreamModels(ctx)
   const usedFallback = fetched.length === 0
   const models = usedFallback ? FALLBACK_MODELS : fetched
   const data = models.map((m) => ({
@@ -419,5 +459,5 @@ export async function listModels(ctx: UpstreamCtx = {}, opts: { debug?: boolean 
     ...(m.context_window ? { context_window: m.context_window } : {}),
   }))
   if (!opts.debug) return { data }
-  return { data, _debug: { usedFallback, count: data.length, supplementedAnthropic, probes, env: envDiag(ctx) } }
+  return { data, _debug: { usedFallback, count: data.length, supplementedAnthropic, supplementedOpenAI, probes, env: envDiag(ctx) } }
 }
