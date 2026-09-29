@@ -29,6 +29,8 @@ export const FALLBACK_MODELS: ModelInfo[] = [
   { id: "o3", provider: "openai", context_window: 200_000 },
   // Anthropic
   { id: "claude-fable-5", provider: "anthropic", context_window: 1_000_000 },
+  { id: "claude-opus-5-5", provider: "anthropic", context_window: 1_000_000 },
+  { id: "claude-sonnet-5-5", provider: "anthropic", context_window: 1_000_000 },
   { id: "claude-opus-5", provider: "anthropic", context_window: 1_000_000 },
   { id: "claude-sonnet-5", provider: "anthropic", context_window: 1_000_000 },
   { id: "claude-haiku-4-5", provider: "anthropic", context_window: 200_000 },
@@ -54,10 +56,12 @@ const NETLIFY_DIRECT_ANTHROPIC = [
   "claude-opus-4-7",
   "claude-opus-4-8",
   "claude-opus-5",
+  "claude-opus-5-5",
   "claude-sonnet-4-5",
   "claude-sonnet-4-5-20250929",
   "claude-sonnet-4-6",
   "claude-sonnet-5",
+  "claude-sonnet-5-5",
 ]
 
 /**
