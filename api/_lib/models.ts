@@ -17,9 +17,11 @@ export interface ModelInfo {
  */
 export const FALLBACK_MODELS: ModelInfo[] = [
   // OpenAI
+  { id: "gpt-6.1-sol", provider: "openai", context_window: 400_000 },
   { id: "gpt-6-astra", provider: "openai", context_window: 400_000 },
   { id: "gpt-6-luna", provider: "openai", context_window: 400_000 },
   { id: "gpt-6-sol", provider: "openai", context_window: 400_000 },
+  { id: "gpt-5.6-luna", provider: "openai", context_window: 400_000 },
   { id: "gpt-5.6-terra", provider: "openai", context_window: 400_000 },
   { id: "gpt-5.6-sol", provider: "openai", context_window: 400_000 },
   { id: "gpt-5.5", provider: "openai", context_window: 400_000 },
@@ -33,6 +35,7 @@ export const FALLBACK_MODELS: ModelInfo[] = [
   { id: "claude-sonnet-5-5", provider: "anthropic", context_window: 1_000_000 },
   { id: "claude-opus-5", provider: "anthropic", context_window: 1_000_000 },
   { id: "claude-sonnet-5", provider: "anthropic", context_window: 1_000_000 },
+  { id: "claude-haiku-5-5", provider: "anthropic", context_window: 200_000 },
   { id: "claude-haiku-4-5", provider: "anthropic", context_window: 200_000 },
 ]
 
@@ -50,6 +53,7 @@ const NETLIFY_DIRECT_ANTHROPIC = [
   "claude-fable-5-1",
   "claude-haiku-4-5",
   "claude-haiku-4-5-20251001",
+  "claude-haiku-5-5",
   "claude-opus-4-5",
   "claude-opus-4-5-20251101",
   "claude-opus-4-6",
@@ -72,9 +76,11 @@ const NETLIFY_DIRECT_ANTHROPIC = [
  * Update as OpenAI adds/removes models.
  */
 const NETLIFY_DIRECT_OPENAI = [
+  "gpt-6.1-sol",
   "gpt-6-astra",
   "gpt-6-luna",
   "gpt-6-sol",
+  "gpt-5.6-luna",
   "gpt-5.6-terra",
   "gpt-5.6-sol",
   "gpt-5.5",
