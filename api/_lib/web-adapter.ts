@@ -45,6 +45,9 @@ export async function toExpressReq(request: Request, pathname: string): Promise<
       } catch {
         body = undefined
       }
+    } else if (ct.includes("multipart/form-data")) {
+      // Kept raw (e.g. /v1/images/edits uploads) so passthrough can forward it verbatim.
+      body = Buffer.from(await request.arrayBuffer())
     }
   }
 

@@ -76,8 +76,13 @@ async function proxyRaw(
   const search = qIndex >= 0 ? req.originalUrl.slice(qIndex) : ""
   const url = `${cfg.baseUrl}${subpath}${search}`
 
-  let bodyStr: string | undefined
-  if (method !== "GET" && method !== "HEAD") {
+  let bodyStr: string | Buffer | undefined
+  if (Buffer.isBuffer(req.body)) {
+    // Raw multipart (image edits/variations): forward bytes + original
+    // content-type (it carries the boundary). MODEL_MAP can't apply here.
+    headers["content-type"] = String(req.headers["content-type"] ?? "application/octet-stream")
+    bodyStr = req.body
+  } else if (method !== "GET" && method !== "HEAD") {
     if (which === "openai" && req.body && (req.body as { model?: string }).model) {
       const b = req.body as { model?: string }
       b.model = applyModelMap(b.model!)

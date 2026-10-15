@@ -17,6 +17,8 @@ export function createApp() {
   app.disable("x-powered-by")
   app.use(cors({ origin: true, credentials: false }))
   app.use(express.json({ limit: "50mb" }))
+  // Multipart uploads (/v1/images/edits) stay raw for verbatim passthrough.
+  app.use(express.raw({ type: "multipart/form-data", limit: "50mb" }))
   app.use(express.urlencoded({ extended: true, limit: "50mb" }))
 
   // Lightweight request log (Vercel already records request metadata; this just
