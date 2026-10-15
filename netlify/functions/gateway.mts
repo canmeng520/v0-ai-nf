@@ -120,6 +120,13 @@ export default async function handler(request: Request): Promise<Response> {
       return
     }
 
+    // Image models (gpt-image-*): /v1/images/generations etc., JSON bodies.
+    if (path.startsWith("/v1/images/")) {
+      if (!authed()) return
+      await handleOpenAIPassthrough(r, xres, path.slice("/v1".length))
+      return
+    }
+
     if (path === "/v1/chat/completions" && method === "POST") {
       if (!authed()) return
       await handleChatCompletions(r, xres)
@@ -155,6 +162,7 @@ export const config = {
     "/v1/responses",
     "/v1/responses/*",
     "/v1/embeddings",
+    "/v1/images/*",
     "/v1/chat/completions",
     "/v1/messages",
     "/v1/messages/count_tokens",

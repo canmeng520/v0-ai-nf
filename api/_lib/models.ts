@@ -88,6 +88,12 @@ const NETLIFY_DIRECT_OPENAI = [
   "gpt-5.4-mini",
   "gpt-5.4-nano",
   "o3",
+  // Image models — served via /v1/images/generations.
+  "gpt-image-2.5-sunburst",
+  "gpt-image-2.5-flare",
+  "gpt-image-2",
+  "gpt-image-1.5",
+  "gpt-image-1",
 ]
 
 /** Known gateway/provider path prefixes emitted by unified gateways (e.g. Vercel

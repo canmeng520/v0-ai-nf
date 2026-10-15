@@ -75,6 +75,11 @@ export function createApp() {
     Promise.resolve(handleOpenAIPassthrough(req, res, "/embeddings")).catch(next)
   })
 
+  // Image models (gpt-image-*): /v1/images/generations etc., JSON bodies.
+  app.all("/v1/images/*splat", bearerAuth, (req, res, next) => {
+    Promise.resolve(handleOpenAIPassthrough(req, res, req.path.slice("/v1".length))).catch(next)
+  })
+
   // Claude Code telemetry sink — must never error; auth-free 200 no-op.
   app.post("/api/event_logging/batch", (_req, res) => {
     res.status(200).json({})
