@@ -1,6 +1,6 @@
 import type { Request, Response } from "express"
 import { getOpenAIConfig, getAnthropicConfig, readOidcToken, fetchUpstream, type UpstreamConfig } from "../upstream.js"
-import { applyModelMap } from "../models.js"
+import { applyModelMap, isImageModel, imageModelMisuse } from "../models.js"
 import { safeCancel, readWithStall, stallTimeoutMs } from "../sse.js"
 import { logger } from "../logger.js"
 
@@ -75,6 +75,12 @@ async function proxyRaw(
   const qIndex = req.originalUrl.indexOf("?")
   const search = qIndex >= 0 ? req.originalUrl.slice(qIndex) : ""
   const url = `${cfg.baseUrl}${subpath}${search}`
+
+  // Image models are only served on /images/* — reject them anywhere else.
+  const reqModel = Buffer.isBuffer(req.body) ? undefined : (req.body as { model?: unknown } | undefined)?.model
+  if (!subpath.startsWith("/images/") && typeof reqModel === "string" && isImageModel(applyModelMap(reqModel))) {
+    return res.status(400).json(imageModelMisuse(reqModel))
+  }
 
   let bodyStr: string | Buffer | undefined
   if (Buffer.isBuffer(req.body)) {

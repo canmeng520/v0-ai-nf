@@ -138,6 +138,22 @@ export function applyModelMap(model: string): string {
   return modelMapCache.map.get(model) ?? model
 }
 
+/** Image-only models (gpt-image-*, dall-e-*), optionally `vendor/`-prefixed. */
+export function isImageModel(model: unknown): boolean {
+  return typeof model === "string" && /^(openai\/)?(gpt-image|dall-e)/i.test(model)
+}
+
+/** 400 body for an image model sent to a non-image endpoint (chat/messages/responses/…). */
+export function imageModelMisuse(model: string) {
+  return {
+    error: {
+      message: `Model \`${model}\` is an image model; use POST /v1/images/generations or /v1/images/edits.`,
+      type: "invalid_request_error",
+      code: "image_model_wrong_endpoint",
+    },
+  }
+}
+
 export function getProvider(model: string): Provider {
   const clean = stripProviderPrefix(model).id
   const exact = FALLBACK_MAP.get(clean)

@@ -1,5 +1,5 @@
 import type { Request, Response } from "express"
-import { getProvider, applyModelMap } from "../models.js"
+import { getProvider, applyModelMap, isImageModel, imageModelMisuse } from "../models.js"
 import {
   getOpenAIConfigChain,
   getAnthropicConfigChain,
@@ -32,6 +32,7 @@ export async function handleMessages(req: Request, res: Response) {
     body.max_tokens = 4096
   }
   body.model = applyModelMap(body.model)
+  if (isImageModel(body.model)) return res.status(400).json(imageModelMisuse(body.model))
 
   const provider = getProvider(body.model)
   const wantStream = body.stream === true
