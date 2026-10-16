@@ -138,7 +138,7 @@ export function applyModelMap(model: string): string {
   return modelMapCache.map.get(model) ?? model
 }
 
-/** Image-only models (gpt-image-*, dall-e-*), optionally `vendor/`-prefixed. */
+/** Image-only models (gpt-image-*, dall-e-*), optionally `openai/`-prefixed. */
 export function isImageModel(model: unknown): boolean {
   return typeof model === "string" && /^(openai\/)?(gpt-image|dall-e)/i.test(model)
 }
