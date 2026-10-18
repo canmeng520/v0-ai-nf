@@ -17,7 +17,7 @@ import { redactErrorMessage } from "../../api/_lib/redact.js"
 import { UpstreamUnreachableError } from "../../api/_lib/upstream.js"
 import { runDiag } from "../../api/_lib/diag.js"
 import { logger } from "../../api/_lib/logger.js"
-import { submitImageJob, pollImageJob } from "../../api/_lib/image-jobs.js"
+import { submitImageJob, startImageJob, pollImageJob } from "../../api/_lib/image-jobs.js"
 
 export default async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url)
@@ -55,6 +55,7 @@ export default async function handler(request: Request): Promise<Response> {
     if (!isAuthorized((n) => request.headers.get(n) ?? undefined)) {
       return new Response(JSON.stringify(UNAUTHORIZED_BODY), { status: 401, headers: { "content-type": "application/json" } })
     }
+    if (request.method === "POST" && pathname === "/v1/jobs/start") return startImageJob(request, req.body)
     if (request.method === "POST") return submitImageJob(request, req.body, pathname)
     if (request.method === "GET") return pollImageJob(pathname)
   }

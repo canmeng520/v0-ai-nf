@@ -11,6 +11,8 @@
  *                               OpenAI passthrough, store status + body
  *   GET  /v1/jobs/<id>          202 {status:"pending"} until done, then the
  *                               upstream response verbatim (status + content-type)
+ *   POST /v1/jobs/start {id}    kick a job whose request the caller uploaded to
+ *                               Blobs itself (bodies over the ~6 MB function limit)
  *
  * Request bodies go through Blobs because a background function only accepts a
  * 256 KB payload. Finished jobs are swept after JOB_TTL_MS.
@@ -44,7 +46,26 @@ export async function submitImageJob(request: Request, body: unknown, path: stri
   const bytes = Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body ?? {}))
   const ct = request.headers.get("content-type") ?? "application/json"
   await store().set(`${id}/req`, toArrayBuffer(bytes), { metadata: { path: `/v1${sub}`, ct } })
+  return kickWorker(request, id)
+}
 
+/**
+ * POST /v1/jobs/start {id} — for requests too large for a function payload
+ * (~6 MB): the caller has already written `${id}/req` (same metadata as above)
+ * straight into the "image-jobs" store via the Blobs API with the account PAT.
+ */
+export async function startImageJob(request: Request, body: unknown): Promise<Response> {
+  const id = (body as { id?: unknown } | undefined)?.id
+  if (typeof id !== "string" || !ID_RE.test(id)) return json(400, { error: { message: "invalid job id", type: "invalid_request_error" } })
+  const meta = (await store().getMetadata(`${id}/req`))?.metadata as { path?: string } | undefined
+  if (!meta?.path || !OPS.test(meta.path.slice("/v1".length))) {
+    return json(404, { error: { message: "job request not found", type: "not_found" } })
+  }
+  void sweep().catch((err) => logger.warn({ err }, "image-jobs sweep failed"))
+  return kickWorker(request, id)
+}
+
+async function kickWorker(request: Request, id: string): Promise<Response> {
   // The worker checks the same API key the caller just passed.
   const auth: Record<string, string> = { "content-type": "application/json" }
   for (const h of ["authorization", "x-api-key"]) {
