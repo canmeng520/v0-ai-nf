@@ -17,6 +17,7 @@ import { redactErrorMessage } from "../../api/_lib/redact.js"
 import { UpstreamUnreachableError } from "../../api/_lib/upstream.js"
 import { runDiag } from "../../api/_lib/diag.js"
 import { logger } from "../../api/_lib/logger.js"
+import { submitImageJob, pollImageJob } from "../../api/_lib/image-jobs.js"
 
 export default async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url)
@@ -48,6 +49,15 @@ export default async function handler(request: Request): Promise<Response> {
   // Cast: the shims implement exactly the slice of Express req/res the handlers use.
   const xreq = req as unknown as ExpressRequest
   const xres = res as unknown as ExpressResponse
+
+  // Image jobs answer with plain Responses (no streaming), outside dispatch.
+  if (pathname.startsWith("/v1/jobs/")) {
+    if (!isAuthorized((n) => request.headers.get(n) ?? undefined)) {
+      return new Response(JSON.stringify(UNAUTHORIZED_BODY), { status: 401, headers: { "content-type": "application/json" } })
+    }
+    if (request.method === "POST") return submitImageJob(request, req.body, pathname)
+    if (request.method === "GET") return pollImageJob(pathname)
+  }
 
   // Run the matched handler WITHOUT awaiting completion, then return the response
   // as soon as headers commit — streaming handlers keep writing the body after.
@@ -163,6 +173,7 @@ export const config = {
     "/v1/responses/*",
     "/v1/embeddings",
     "/v1/images/*",
+    "/v1/jobs/*",
     "/v1/chat/completions",
     "/v1/messages",
     "/v1/messages/count_tokens",
