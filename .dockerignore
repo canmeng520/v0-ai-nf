@@ -1,0 +1,5 @@
+**/node_modules
+.git
+.netlify
+apps/web/dist
+.tmp-ops
