@@ -62,6 +62,25 @@ export async function handleAnthropicPassthrough(req: Request, res: Response, su
   return proxyRaw(req, res, cfg, subpath, headers, "anthropic")
 }
 
+// gpt-image-* always answer with b64_json and 400 on `response_format`
+// ("Unknown parameter"), which DALL·E-era clients still send. Drop it for them;
+// dall-e-* keep it (they support url/b64_json).
+const isGptImage = (model: unknown) => typeof model === "string" && /^(openai\/)?gpt-image/i.test(model)
+
+/** Remove the `response_format` part from a gpt-image multipart body (edits/variations). */
+export function stripGptImageMultipart(body: Buffer, contentType: string): Buffer {
+  const boundary = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType)
+  if (!boundary) return body
+  // latin1 maps bytes 1:1, so binary image parts survive the round trip.
+  const s = body.toString("latin1")
+  const model = /\r\nContent-Disposition:[^\r\n]*\bname="model"[^\r\n]*\r\n(?:[^\r\n]+\r\n)*\r\n([^\r\n]*)/i.exec("\r\n" + s)?.[1]
+  if (!isGptImage(model?.trim())) return body
+  const delim = `--${boundary[1] ?? boundary[2]}`
+  const parts = s.split(delim)
+  const kept = parts.filter((p) => !/^\r\nContent-Disposition:[^\r\n]*\bname="response_format"/i.test(p))
+  return kept.length === parts.length ? body : Buffer.from(kept.join(delim), "latin1")
+}
+
 /** Forward the request verbatim and stream the response back raw. */
 async function proxyRaw(
   req: Request,
@@ -87,11 +106,12 @@ async function proxyRaw(
     // Raw multipart (image edits/variations): forward bytes + original
     // content-type (it carries the boundary). MODEL_MAP can't apply here.
     headers["content-type"] = String(req.headers["content-type"] ?? "application/octet-stream")
-    bodyStr = req.body
+    bodyStr = subpath.startsWith("/images/") ? stripGptImageMultipart(req.body, headers["content-type"]) : req.body
   } else if (method !== "GET" && method !== "HEAD") {
     if (which === "openai" && req.body && (req.body as { model?: string }).model) {
-      const b = req.body as { model?: string }
+      const b = req.body as { model?: string; response_format?: unknown }
       b.model = applyModelMap(b.model!)
+      if (subpath.startsWith("/images/") && isGptImage(b.model)) delete b.response_format
       if (cfg.gateway && !b.model.includes("/")) b.model = `openai/${b.model}`
     }
     // Always send content-type + a JSON body (even `{}`) on writes — some
