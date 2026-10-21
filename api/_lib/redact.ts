@@ -24,6 +24,7 @@ const PROMO_RE = /\s*Build and deploy your own site for free:?[^\n]*/gi
 const CONTACT_RE = /\s*(?:If you believe this is an error, )?contact us(?: at [^\s.,]+(?:\.[^\s.,]+)*)?(?: and include[^.]*)?\.?/gi
 const HOST_RE = /\b(?:[\w-]+\.)*(?:openai\.com|netlify\.(?:app|com|new))\b/gi
 const PLATFORM_RE = /\bnetlify(?:-[a-z]+)*\b/gi
+const ORG_RE = /\s*(?:in )?organization org-[A-Za-z0-9]+/gi
 
 export function redactUrls(text: string): string {
   if (!text) return text
@@ -34,6 +35,7 @@ export function redactUrls(text: string): string {
     .replace(REQ_ID_RE, "")
     .replace(PROMO_RE, "")
     .replace(CONTACT_RE, "")
+    .replace(ORG_RE, "")
     .replace(HOST_RE, "[redacted-upstream]")
     .replace(PLATFORM_RE, "upstream")
     .trimEnd()
