@@ -10,19 +10,31 @@ const URL_RE = /\bhttps?:\/\/[^\s"'`<>)\]}]+/gi
 // Bare host:port and IPv4(:port) — catches endpoints quoted without a scheme.
 const IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g
 
-// Hosting-platform fingerprints in error pages ("Not Found - Request ID: 01M5…",
-// "Build and deploy your own site for free: …") and the platform name itself.
-const REQ_ID_RE = /\s*-?\s*Request ID:\s*[0-9A-Za-z]{16,}/g
+// Whole messages that only make sense for the channel behind us: replace them
+// with our own wording.
+const REWRITES: Array<[RegExp, string]> = [
+  // Hosting platform 404 page ("Not Found - Request ID: 01M5… Build and deploy your own site…").
+  [/^\s*Not Found - Request ID[\s\S]*$/i, "The upstream service is temporarily unavailable. Please retry."],
+  // Provider moderation text with its help-center link and request id.
+  [/^\s*Your request was rejected by the safety system[\s\S]*$/i, "Your request was rejected by the content safety system. Please modify the prompt and try again."],
+]
+// Fingerprints that can appear inside otherwise useful messages.
+const REQ_ID_RE = /\s*-?\s*Request ID:?\s*(?:req_)?[0-9A-Za-z_]{16,}\.?/gi
 const PROMO_RE = /\s*Build and deploy your own site for free:?[^\n]*/gi
+const CONTACT_RE = /\s*(?:If you believe this is an error, )?contact us(?: at [^\s.,]+(?:\.[^\s.,]+)*)?(?: and include[^.]*)?\.?/gi
+const HOST_RE = /\b(?:[\w-]+\.)*(?:openai\.com|netlify\.(?:app|com|new))\b/gi
 const PLATFORM_RE = /\bnetlify(?:-[a-z]+)*\b/gi
 
 export function redactUrls(text: string): string {
   if (!text) return text
+  for (const [re, msg] of REWRITES) if (re.test(text)) return msg
   return text
     .replace(URL_RE, "[redacted-upstream]")
     .replace(IPV4_RE, "[redacted-upstream]")
     .replace(REQ_ID_RE, "")
     .replace(PROMO_RE, "")
+    .replace(CONTACT_RE, "")
+    .replace(HOST_RE, "[redacted-upstream]")
     .replace(PLATFORM_RE, "upstream")
     .trimEnd()
 }
