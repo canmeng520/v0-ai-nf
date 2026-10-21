@@ -3,6 +3,7 @@ import { getOpenAIConfig, getAnthropicConfig, readOidcToken, fetchUpstream, type
 import { applyModelMap, isImageModel, imageModelMisuse } from "../models.js"
 import { safeCancel, readWithStall, stallTimeoutMs } from "../sse.js"
 import { logger } from "../logger.js"
+import { redactDeep, redactUrls } from "../redact.js"
 
 /**
  * Generic OpenAI-format passthrough for endpoints beyond chat/completions
@@ -140,6 +141,19 @@ async function proxyRaw(
     return
   }
   const isSse = (ct ?? "").includes("text/event-stream")
+  // Error bodies are small: buffer them and strip upstream URLs / platform
+  // fingerprints (e.g. a hosting 404 page) before the client sees them.
+  if (upstreamRes.status >= 400 && !isSse) {
+    const text = await upstreamRes.text().catch(() => "")
+    let out: string
+    try {
+      out = JSON.stringify(redactDeep(JSON.parse(text)))
+    } catch {
+      out = redactUrls(text)
+    }
+    res.end(out)
+    return
+  }
   const reader = upstreamRes.body.getReader()
   res.on("close", () => safeCancel(reader))
   const stallMs = stallTimeoutMs()

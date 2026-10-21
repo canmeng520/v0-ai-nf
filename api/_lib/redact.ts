@@ -10,9 +10,21 @@ const URL_RE = /\bhttps?:\/\/[^\s"'`<>)\]}]+/gi
 // Bare host:port and IPv4(:port) — catches endpoints quoted without a scheme.
 const IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g
 
+// Hosting-platform fingerprints in error pages ("Not Found - Request ID: 01M5…",
+// "Build and deploy your own site for free: …") and the platform name itself.
+const REQ_ID_RE = /\s*-?\s*Request ID:\s*[0-9A-Za-z]{16,}/g
+const PROMO_RE = /\s*Build and deploy your own site for free:?[^\n]*/gi
+const PLATFORM_RE = /\bnetlify(?:-[a-z]+)*\b/gi
+
 export function redactUrls(text: string): string {
   if (!text) return text
-  return text.replace(URL_RE, "[redacted-upstream]").replace(IPV4_RE, "[redacted-upstream]")
+  return text
+    .replace(URL_RE, "[redacted-upstream]")
+    .replace(IPV4_RE, "[redacted-upstream]")
+    .replace(REQ_ID_RE, "")
+    .replace(PROMO_RE, "")
+    .replace(PLATFORM_RE, "upstream")
+    .trimEnd()
 }
 
 /** Recursively redact URLs/hosts in every string of a JSON-ish value. */
