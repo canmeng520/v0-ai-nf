@@ -7,6 +7,7 @@ import { buildHealth } from "./health.js"
 import { handleChatCompletions } from "./routes/chat-completions.js"
 import { handleMessages } from "./routes/messages.js"
 import { handleOpenAIPassthrough, handleAnthropicPassthrough } from "./routes/passthrough.js"
+import { handleGemini, handleGeminiModels } from "./routes/gemini.js"
 import { readOidcToken, UpstreamUnreachableError } from "./upstream.js"
 import { redactErrorMessage } from "./redact.js"
 import { runDiag } from "./diag.js"
@@ -27,7 +28,8 @@ export function createApp() {
     const start = Date.now()
     res.on("finish", () => {
       logger.info(
-        { method: req.method, url: req.originalUrl, status: res.statusCode, ms: Date.now() - start },
+        // `?key=` (Gemini clients) must not end up in logs.
+        { method: req.method, url: req.originalUrl.replace(/([?&]key=)[^&]*/i, "$1***"), status: res.statusCode, ms: Date.now() - start },
         "request",
       )
     })
@@ -80,6 +82,15 @@ export function createApp() {
   // Image models (gpt-image-*): /v1/images/generations etc., JSON bodies.
   app.all("/v1/images/*splat", bearerAuth, (req, res, next) => {
     Promise.resolve(handleOpenAIPassthrough(req, res, req.path.slice("/v1".length))).catch(next)
+  })
+
+  // ----- Google Gemini native API, served by the chat pipeline -----
+  // GET /v1/models stays OpenAI's list; Gemini clients list via /v1beta.
+  app.get(["/v1beta/models", "/v1beta/models/*splat"], bearerAuth, (req, res, next) => {
+    Promise.resolve(handleGeminiModels(req, res)).catch(next)
+  })
+  app.post(["/v1beta/models/*splat", "/v1/models/*splat"], bearerAuth, (req, res, next) => {
+    Promise.resolve(handleGemini(req, res)).catch(next)
   })
 
   // Claude Code telemetry sink — must never error; auth-free 200 no-op.

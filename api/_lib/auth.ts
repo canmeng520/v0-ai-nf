@@ -15,7 +15,7 @@ export function isAuthorized(getHeader: (name: string) => string | undefined): b
     if (m) token = m[1]
   }
   if (!token) {
-    const xKey = getHeader("x-api-key")
+    const xKey = getHeader("x-api-key") ?? getHeader("x-goog-api-key")
     if (xKey) token = xKey
   }
   return Boolean(token && token === expected)
@@ -30,7 +30,9 @@ export const UNAUTHORIZED_BODY = {
 }
 
 export function bearerAuth(req: Request, res: Response, next: NextFunction) {
-  if (!isAuthorized((name) => req.header(name) ?? undefined)) {
+  // Gemini clients may send the key as `?key=` instead of a header.
+  const queryKey = typeof req.query?.key === "string" ? req.query.key : undefined
+  if (!isAuthorized((name) => req.header(name) ?? (name === "x-goog-api-key" ? queryKey : undefined))) {
     return res.status(401).json(UNAUTHORIZED_BODY)
   }
   return next()
