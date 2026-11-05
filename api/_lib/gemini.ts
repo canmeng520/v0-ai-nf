@@ -260,16 +260,90 @@ function contentParts(content: unknown): Json[] {
   return out
 }
 
+// With includeThoughts the upstream's OpenAI surface inlines the reasoning as a
+// leading `<think>…</think>` block in the content; Gemini clients expect it as
+// separate `thought: true` parts.
+const THINK_OPEN = "<think>"
+const THINK_CLOSE = "</think>"
+
+/** Split a leading think block off the first text part (non-streaming). */
+function splitThink(parts: Json[]): Json[] {
+  const first = parts[0]
+  if (typeof first?.text !== "string" || !first.text.trimStart().startsWith(THINK_OPEN)) return parts
+  const t = first.text.trimStart().slice(THINK_OPEN.length)
+  const end = t.indexOf(THINK_CLOSE)
+  if (end < 0) return [{ text: t, thought: true }, ...parts.slice(1)]
+  const rest = t.slice(end + THINK_CLOSE.length).replace(/^\s+/, "")
+  const answer: Json = { ...first, text: rest }
+  return [{ text: t.slice(0, end).trim(), thought: true }, ...(rest || first.thoughtSignature ? [answer] : []), ...parts.slice(1)]
+}
+
+/**
+ * Streaming counterpart of splitThink: the tags may be cut across deltas, so
+ * hold back just enough text to recognise them.
+ */
+class ThinkSplitter {
+  private mode: "detect" | "thought" | "text" = "detect"
+  private buf = ""
+
+  /** Feed a text delta; returns the parts ready to send. */
+  push(s: string): Json[] {
+    this.buf += s
+    const out: Json[] = []
+    if (this.mode === "detect") {
+      const lead = this.buf.trimStart()
+      if (lead.length < THINK_OPEN.length && THINK_OPEN.startsWith(lead)) return out
+      if (lead.startsWith(THINK_OPEN)) {
+        this.mode = "thought"
+        this.buf = lead.slice(THINK_OPEN.length)
+      } else {
+        this.mode = "text"
+      }
+    }
+    if (this.mode === "thought") {
+      const end = this.buf.indexOf(THINK_CLOSE)
+      if (end >= 0) {
+        const thought = this.buf.slice(0, end)
+        if (thought) out.push({ text: thought, thought: true })
+        this.buf = this.buf.slice(end + THINK_CLOSE.length).replace(/^\s+/, "")
+        this.mode = "text"
+      } else {
+        // Keep a tail that could be the start of the closing tag.
+        const keep = THINK_CLOSE.length - 1
+        if (this.buf.length > keep) {
+          out.push({ text: this.buf.slice(0, -keep), thought: true })
+          this.buf = this.buf.slice(-keep)
+        }
+        return out
+      }
+    }
+    if (this.mode === "text" && this.buf) {
+      out.push({ text: this.buf })
+      this.buf = ""
+    }
+    return out
+  }
+
+  /** Whatever is still held back, at the end of the stream. */
+  flush(): Json[] {
+    const s = this.buf
+    this.buf = ""
+    if (!s) return []
+    return [this.mode === "thought" ? { text: s, thought: true } : { text: s }]
+  }
+}
+
 export function openAIToGeminiResponse(resp: Json, model: string): Json {
   const candidates = (resp.choices ?? []).map((ch: Json, i: number) => {
     const msg: Json = ch.message ?? {}
     const parts: Json[] = []
     const reasoning = msg.reasoning_content ?? msg.reasoning
     if (typeof reasoning === "string" && reasoning) parts.push({ text: reasoning, thought: true })
-    const text = contentParts(msg.content)
+    const text = splitThink(contentParts(msg.content))
     const msgSig = sigOf(msg)
     if (msgSig) {
-      if (text.length) text[0].thoughtSignature = msgSig
+      const answer = text.find((p) => !p.thought)
+      if (answer) answer.thoughtSignature = msgSig
       else text.push({ text: "", thoughtSignature: msgSig })
     }
     parts.push(...text)
@@ -296,6 +370,7 @@ export function openAIToGeminiResponse(resp: Json, model: string): Json {
  */
 export class GeminiStreamConverter {
   private calls = new Map<number, Map<number, { id?: string; name: string; args: string; sig?: string }>>()
+  private think = new Map<number, ThinkSplitter>()
   private finished: Json | null = null
   private usage: Json | undefined
   private responseId: string | undefined
@@ -319,10 +394,18 @@ export class GeminiStreamConverter {
       const parts: Json[] = []
       const reasoning = d.reasoning_content ?? d.reasoning
       if (typeof reasoning === "string" && reasoning) parts.push({ text: reasoning, thought: true })
-      const text = contentParts(d.content)
+      const splitter = this.think.get(idx) ?? new ThinkSplitter()
+      this.think.set(idx, splitter)
+      const text: Json[] = []
+      for (const p of contentParts(d.content)) {
+        if (typeof p.text === "string") text.push(...splitter.push(p.text))
+        else text.push(p)
+      }
+      if (ch.finish_reason) text.push(...splitter.flush())
       const sig = sigOf(d)
       if (sig) {
-        if (text.length) text[0].thoughtSignature = sig
+        const answer = text.find((p) => !p.thought)
+        if (answer) answer.thoughtSignature = sig
         else text.push({ text: "", thoughtSignature: sig })
       }
       parts.push(...text)
@@ -344,6 +427,7 @@ export class GeminiStreamConverter {
           parts.push(part)
         }
         this.calls.delete(idx)
+        this.think.delete(idx)
         // Held back so the usage that follows can ride on it.
         const cand = { content: { role: "model", parts: parts.length ? parts : [{ text: "" }] }, finishReason: finishReason(ch.finish_reason), index: idx }
         this.finished = this.finished ? { ...this.finished, candidates: [...this.finished.candidates, cand] } : this.chunk([cand])
@@ -356,10 +440,17 @@ export class GeminiStreamConverter {
 
   /** The held final chunk (finish reason + usage), if any. */
   end(): Json[] {
+    // A stream that ended without a finish_reason may still hold text back.
+    const tail: Json[] = []
+    for (const [idx, s] of this.think) {
+      const parts = s.flush()
+      if (parts.length) tail.push(this.chunk([{ content: { role: "model", parts }, index: idx }]))
+    }
+    this.think.clear()
     const last = this.finished ?? (this.usage ? this.chunk([{ content: { role: "model", parts: [{ text: "" }] }, finishReason: "STOP", index: 0 }]) : null)
-    if (!last) return []
+    if (!last) return tail
     if (this.usage) last.usageMetadata = this.usage
-    return [last]
+    return [...tail, last]
   }
 }
 
