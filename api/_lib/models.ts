@@ -18,6 +18,7 @@ export interface ModelInfo {
 export const FALLBACK_MODELS: ModelInfo[] = [
   // OpenAI
   { id: "gpt-6.1-sol", provider: "openai", context_window: 400_000 },
+  { id: "gpt-6.1-terra", provider: "openai", context_window: 400_000 },
   { id: "gpt-6-astra", provider: "openai", context_window: 400_000 },
   { id: "gpt-6-luna", provider: "openai", context_window: 400_000 },
   { id: "gpt-6-sol", provider: "openai", context_window: 400_000 },
@@ -77,6 +78,7 @@ const NETLIFY_DIRECT_ANTHROPIC = [
  */
 const NETLIFY_DIRECT_OPENAI = [
   "gpt-6.1-sol",
+  "gpt-6.1-terra",
   "gpt-6-astra",
   "gpt-6-luna",
   "gpt-6-sol",
@@ -89,6 +91,8 @@ const NETLIFY_DIRECT_OPENAI = [
   "gpt-5.4-nano",
   "o3",
   // Image models — served via /v1/images/generations.
+  "gpt-image-2.6-sunburst",
+  "gpt-image-2.6-flare",
   "gpt-image-2.5-sunburst",
   "gpt-image-2.5-flare",
   "gpt-image-2",
