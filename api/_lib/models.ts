@@ -100,6 +100,35 @@ const NETLIFY_DIRECT_OPENAI = [
   "gpt-image-1",
 ]
 
+/**
+ * Gemini models the Netlify AI Gateway serves (callable through the same
+ * OpenAI-format /v1/chat/completions) but that no list endpoint we can reach
+ * returns. Supplemented whenever the upstream is the Netlify gateway and no
+ * Gemini ids came back live — from the site's own Gemini probe or, on the VPS,
+ * via the site's /v1/models. Source: Netlify AI Gateway provider catalogue.
+ */
+const NETLIFY_DIRECT_GEMINI = [
+  "gemini-4-argon",
+  "gemini-3.8-flash",
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-pro-preview-customtools",
+  "gemini-3.1-flash-lite",
+  "gemini-3-flash-preview",
+  "gemini-flash-latest",
+  "gemini-flash-lite-latest",
+  // Image-capable
+  "gemini-nano-banana-2.1",
+  "gemini-3-pro-image",
+  "gemini-3.1-flash-image",
+  "gemini-3.1-flash-lite-image",
+  "gemini-2.5-flash-image",
+]
+const isGeminiId = (id: string) => /^gemini-/i.test(id)
+
 /** Known gateway/provider path prefixes emitted by unified gateways (e.g. Vercel
  * returns `anthropic/claude-...`). We strip these so clients get clean ids that
  * route correctly back through this proxy. */
@@ -373,7 +402,7 @@ function buildSources(ctx: UpstreamCtx): Source[] {
  */
 export async function fetchUpstreamModels(
   ctx: UpstreamCtx = {},
-): Promise<{ models: ModelInfo[]; probes: ProbeDiag[]; supplementedAnthropic: number; supplementedOpenAI: number }> {
+): Promise<{ models: ModelInfo[]; probes: ProbeDiag[]; supplementedAnthropic: number; supplementedOpenAI: number; supplementedGemini: number }> {
   const sources = buildSources(ctx)
   const probedUrls = new Set<string>()
 
@@ -404,7 +433,8 @@ export async function fetchUpstreamModels(
       if (seen.has(id)) continue
       seen.add(id)
       // For kept-prefix ids (OpenRouter) the vendor segment is the truest provider label.
-      const provider = src.keepPrefix && vendor ? vendor : (stripped.provider ?? src.provider)
+      // Bare gemini-* ids relayed through an OpenAI-format list are still Google's.
+      const provider = src.keepPrefix && vendor ? vendor : (stripped.provider ?? (isGeminiId(id) ? "google" : src.provider))
       models.push({ id, provider, context_window: FALLBACK_MAP.get(id)?.context_window ?? 0 })
     }
   }
@@ -441,7 +471,19 @@ export async function fetchUpstreamModels(
     }
   }
 
-  return { models, probes, supplementedAnthropic, supplementedOpenAI }
+  // Gemini goes through the same gateway. Its native list endpoint is not
+  // reachable through the gateway, so supplement when no Gemini id came back.
+  let supplementedGemini = 0
+  if (isNetlifyGateway && !models.some((m) => isGeminiId(m.id))) {
+    for (const id of NETLIFY_DIRECT_GEMINI) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      models.push({ id, provider: "google", context_window: FALLBACK_MAP.get(id)?.context_window ?? 1_000_000 })
+      supplementedGemini++
+    }
+  }
+
+  return { models, probes, supplementedAnthropic, supplementedOpenAI, supplementedGemini }
 }
 
 /**
@@ -483,7 +525,7 @@ export function envDiag(ctx: UpstreamCtx) {
  * present, so an incomplete list can be diagnosed against the real upstream.
  */
 export async function listModels(ctx: UpstreamCtx = {}, opts: { debug?: boolean } = {}) {
-  const { models: fetched, probes, supplementedAnthropic, supplementedOpenAI } = await fetchUpstreamModels(ctx)
+  const { models: fetched, probes, supplementedAnthropic, supplementedOpenAI, supplementedGemini } = await fetchUpstreamModels(ctx)
   const usedFallback = fetched.length === 0
   const models = usedFallback ? FALLBACK_MODELS : fetched
   const data = models.map((m) => ({
@@ -495,5 +537,5 @@ export async function listModels(ctx: UpstreamCtx = {}, opts: { debug?: boolean 
     ...(m.context_window ? { context_window: m.context_window } : {}),
   }))
   if (!opts.debug) return { data }
-  return { data, _debug: { usedFallback, count: data.length, supplementedAnthropic, supplementedOpenAI, probes, env: envDiag(ctx) } }
+  return { data, _debug: { usedFallback, count: data.length, supplementedAnthropic, supplementedOpenAI, supplementedGemini, probes, env: envDiag(ctx) } }
 }
