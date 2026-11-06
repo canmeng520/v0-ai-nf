@@ -204,6 +204,33 @@ async function shrinkJson(body: EditJson, size: number): Promise<Fit<EditJson>> 
   return { error: tooLarge(size, last) }
 }
 
+// Documented limit for GPT image models (images: maxItems 16). The upstream
+// doesn't enforce it, so it is enforced here, as OpenAI words the error.
+export const MAX_EDIT_IMAGES = 16
+
+/** 400 body when an edit carries more input images than the documented limit, else null. */
+export function editImageCountError(req: Request) {
+  let n = 0
+  if (Buffer.isBuffer(req.body)) {
+    const boundary = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(String(req.headers["content-type"] ?? ""))
+    const parts = boundary ? parseMultipart(req.body, boundary[1] ?? boundary[2]) : null
+    n = (parts ?? []).filter((p) => /^image(\[\d*\])?$/.test(fieldName(p.head))).length
+  } else if (req.body && typeof req.body === "object") {
+    normalizeImageEditJson(req.body as Record<string, unknown>)
+    const images = (req.body as { images?: unknown }).images
+    n = Array.isArray(images) ? images.length : 0
+  }
+  if (n <= MAX_EDIT_IMAGES) return null
+  return {
+    error: {
+      message: `Invalid 'images': array too long. Expected an array with maximum length ${MAX_EDIT_IMAGES}, but got an array with length ${n} instead.`,
+      type: "invalid_request_error",
+      param: "images",
+      code: "array_above_max_length",
+    },
+  }
+}
+
 /**
  * POST /v1/images/edits: normalize JSON edits, then shrink an oversized body in
  * place. Returns an error to send instead (status + message), or null to go on.
