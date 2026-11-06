@@ -103,6 +103,15 @@ function nonStreamDeadlineMs(): number {
   return Number.isFinite(v) && v > 0 ? v : 18_000
 }
 
+/** How long one NON-streaming attempt waits for response headers. A non-stream
+ * upstream only answers once the whole completion is done, so this caps the
+ * answer length. Default 30s fits a hosting function wall; self-hosted (VPS),
+ * where nothing cuts the call, raise it with UPSTREAM_FIRST_BYTE_MS. */
+function nonStreamFirstByteMs(): number | undefined {
+  const v = Number(process.env.UPSTREAM_FIRST_BYTE_MS)
+  return Number.isFinite(v) && v > 0 ? v : undefined
+}
+
 /** If the upstream hasn't returned response headers within this window, open the
  * client SSE stream + heartbeat anyway. Reasoning models (gpt-6-astra, o-series)
  * can spend 20-40s "thinking" before the first token, during which the upstream
@@ -144,7 +153,8 @@ function isFailoverStatus(status: number): boolean {
  * every candidate stayed unreachable.
  */
 export async function acquireUpstream(candidates: UpstreamCandidate[]): Promise<Response> {
-  const deadline = Date.now() + nonStreamDeadlineMs()
+  const t0 = Date.now()
+  const deadline = t0 + nonStreamDeadlineMs()
   let lastFailure: Response | null = null
   let lastError: string | undefined
   let totalAttempts = 0
@@ -154,7 +164,7 @@ export async function acquireUpstream(candidates: UpstreamCandidate[]): Promise<
     if (remaining <= 0) break
     const slice = Math.max(2_000, Math.floor(remaining / (candidates.length - i)))
     const c = candidates[i]
-    const { res, attempts, lastError: err } = await fetchUpstreamUntil(c.url, c.init, Math.min(slice, remaining))
+    const { res, attempts, lastError: err } = await fetchUpstreamUntil(c.url, c.init, Math.min(slice, remaining), nonStreamFirstByteMs())
     totalAttempts += attempts
     if (err) lastError = err
     if (res) {
@@ -176,7 +186,8 @@ export async function acquireUpstream(candidates: UpstreamCandidate[]): Promise<
   }
 
   if (lastFailure) return lastFailure
-  const secs = Math.round(nonStreamDeadlineMs() / 1000)
+  // Real elapsed time: one slow attempt can run past the retry window.
+  const secs = Math.round((Date.now() - t0) / 1000)
   throw new UpstreamUnreachableError(
     `upstream unreachable for ${secs}s / ${totalAttempts} attempts across ${candidates.length} upstream(s) (non-stream): ${lastError ?? "fetch failed"}`,
     totalAttempts,
