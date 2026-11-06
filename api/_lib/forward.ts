@@ -328,6 +328,14 @@ export async function pumpRawStream(
   const stallMs = stallTimeoutMs()
   const t0 = Date.now()
   let bytes = 0
+  // Terminal marker of each dialect. A stream that ends without it was cut
+  // upstream (e.g. a hosting function hit its time limit) and gets an explicit
+  // error event, so the client doesn't take a truncated answer as complete.
+  const terminal = format === "anthropic" ? /"message_stop"|event: error/ : /\[DONE\]/
+  const decoder = new TextDecoder()
+  let tail = ""
+  let finished = false
+  let failed = false
   try {
     for (;;) {
       const result = await readWithStall(reader, stallMs)
@@ -335,17 +343,31 @@ export async function pumpRawStream(
         logger.warn({ ms: Date.now() - t0, bytes }, "upstream stream stalled — aborting")
         safeCancel(reader)
         emitStreamError(res, format, `upstream stream stalled (no data for ${Math.round(stallMs / 1000)}s)`)
+        failed = true
         break
       }
       if (result.done) break
       if (result.value) {
         bytes += result.value.byteLength
+        if (!finished) {
+          const text = tail + decoder.decode(result.value, { stream: true })
+          finished = terminal.test(text)
+          tail = text.slice(-32)
+        }
         res.write(Buffer.from(result.value))
       }
     }
   } catch (err) {
     logger.error({ err }, "stream pass-through error")
   } finally {
+    if (!finished && !failed && !res.writableEnded) {
+      logger.warn({ ms: Date.now() - t0, bytes }, "upstream stream ended without its terminal event")
+      try {
+        emitStreamError(res, format, "upstream stream ended before the response was complete")
+      } catch {
+        /* client already gone */
+      }
+    }
     logger.info({ ms: Date.now() - t0, bytes }, "stream complete")
     if (!res.writableEnded) res.end()
   }

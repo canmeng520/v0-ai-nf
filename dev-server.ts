@@ -6,6 +6,11 @@ import { logger } from "./api/_lib/logger.js"
 const port = Number(process.env.PORT ?? 8787)
 const server = http.createServer(app)
 attachWsBridge(server)
+// Node closes idle keep-alive sockets after 5s; a client reusing one at that
+// instant gets "connection closed without response" (seen under 100-way load).
+// Keep idle sockets well past typical client pool lifetimes instead.
+server.keepAliveTimeout = 75_000
+server.headersTimeout = 76_000
 
 // reusePort lets a hot-update container bind the same port before this one
 // leaves; on SIGTERM stop accepting, let in-flight streams finish, then exit.

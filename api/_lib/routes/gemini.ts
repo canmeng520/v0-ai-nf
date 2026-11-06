@@ -120,6 +120,7 @@ export async function handleGemini(req: Request, res: Response) {
   }
 
   const conv = new GeminiStreamConverter(model)
+  let errored = false
   try {
     for await (const ev of parseSseStream(body2)) {
       if (!ev.data || ev.data === "[DONE]") continue
@@ -131,11 +132,18 @@ export async function handleGemini(req: Request, res: Response) {
       }
       if (j?.error) {
         emit(geminiError(502, String(j.error.message ?? "upstream error")))
+        errored = true
         break
       }
       for (const c of conv.push(j)) emit(c)
     }
     for (const c of conv.end()) emit(c)
+    // The upstream closed without finishing (e.g. the hosting function was cut
+    // at its time limit): say so instead of ending as if the answer were whole.
+    if (!errored && !conv.completed) {
+      logger.warn({ model }, "gemini stream ended before completion")
+      emit(geminiError(504, "The upstream stream ended before the response was complete. Please retry."))
+    }
   } catch (err) {
     logger.warn({ err }, "gemini stream conversion aborted")
     emit(geminiError(504, redactErrorMessage(err)))

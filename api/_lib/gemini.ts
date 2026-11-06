@@ -221,11 +221,17 @@ export const finishReason = (r: string | null | undefined) => (r ? (FINISH[r] ??
 
 export function usageMetadata(u: Json | undefined | null): Json | undefined {
   if (!u) return undefined
-  const thoughts = u.completion_tokens_details?.reasoning_tokens
+  const thoughts = u.completion_tokens_details?.reasoning_tokens ?? 0
+  const prompt = u.prompt_tokens ?? 0
+  const completion = u.completion_tokens ?? 0
+  const total = u.total_tokens ?? prompt + completion
+  // OpenAI counts reasoning inside completion_tokens (total = prompt + completion);
+  // Gemini's OpenAI surface keeps it out (total = prompt + completion + reasoning).
+  const reasoningInside = prompt + completion >= total
   const meta: Json = {
-    promptTokenCount: u.prompt_tokens ?? 0,
-    candidatesTokenCount: Math.max(0, (u.completion_tokens ?? 0) - (thoughts ?? 0)),
-    totalTokenCount: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
+    promptTokenCount: prompt,
+    candidatesTokenCount: reasoningInside ? Math.max(0, completion - thoughts) : completion,
+    totalTokenCount: total,
   }
   if (thoughts) meta.thoughtsTokenCount = thoughts
   const cached = u.prompt_tokens_details?.cached_tokens
@@ -396,10 +402,14 @@ export class GeminiStreamConverter {
       if (typeof reasoning === "string" && reasoning) parts.push({ text: reasoning, thought: true })
       const splitter = this.think.get(idx) ?? new ThinkSplitter()
       this.think.set(idx, splitter)
+      // Streamed thought summaries arrive as their own deltas flagged
+      // extra_content.google.thought (non-streaming inlines them as <think>).
+      const flaggedThought = d.extra_content?.google?.thought === true
       const text: Json[] = []
       for (const p of contentParts(d.content)) {
-        if (typeof p.text === "string") text.push(...splitter.push(p.text))
-        else text.push(p)
+        if (typeof p.text !== "string") text.push(p)
+        else if (flaggedThought) { if (p.text) text.push({ text: p.text, thought: true }) }
+        else text.push(...splitter.push(p.text))
       }
       if (ch.finish_reason) text.push(...splitter.flush())
       const sig = sigOf(d)
@@ -436,6 +446,11 @@ export class GeminiStreamConverter {
       if (parts.length) out.push(this.chunk([{ content: { role: "model", parts }, index: idx }]))
     }
     return out
+  }
+
+  /** Whether the upstream stream reached its end (a finish reason or the usage that follows it). */
+  get completed(): boolean {
+    return this.finished !== null || this.usage !== undefined
   }
 
   /** The held final chunk (finish reason + usage), if any. */
