@@ -8,6 +8,7 @@ import { handleChatCompletions } from "./routes/chat-completions.js"
 import { handleMessages } from "./routes/messages.js"
 import { handleOpenAIPassthrough, handleAnthropicPassthrough } from "./routes/passthrough.js"
 import { handleGemini, handleGeminiModels } from "./routes/gemini.js"
+import { fitImageEdit } from "./image-shrink.js"
 import { readOidcToken, UpstreamUnreachableError } from "./upstream.js"
 import { redactErrorMessage } from "./redact.js"
 import { runDiag } from "./diag.js"
@@ -17,10 +18,13 @@ export function createApp() {
 
   app.disable("x-powered-by")
   app.use(cors({ origin: true, credentials: false }))
-  app.use(express.json({ limit: "50mb" }))
+  // Large enough for high-res image edits, which fitImageEdit shrinks below the
+  // upstream limit before forwarding. BODY_LIMIT overrides (e.g. "200mb").
+  const bodyLimit = process.env.BODY_LIMIT || "100mb"
+  app.use(express.json({ limit: bodyLimit }))
   // Multipart uploads (/v1/images/edits) stay raw for verbatim passthrough.
-  app.use(express.raw({ type: "multipart/form-data", limit: "50mb" }))
-  app.use(express.urlencoded({ extended: true, limit: "50mb" }))
+  app.use(express.raw({ type: "multipart/form-data", limit: bodyLimit }))
+  app.use(express.urlencoded({ extended: true, limit: bodyLimit }))
 
   // Lightweight request log (Vercel already records request metadata; this just
   // adds the route + status to function logs without pulling in pino-http).
@@ -80,8 +84,16 @@ export function createApp() {
   })
 
   // Image models (gpt-image-*): /v1/images/generations etc., JSON bodies.
+  // Edits first get oversized input images shrunk to fit the upstream limit.
   app.all("/v1/images/*splat", bearerAuth, (req, res, next) => {
-    Promise.resolve(handleOpenAIPassthrough(req, res, req.path.slice("/v1".length))).catch(next)
+    const run = async () => {
+      if (req.method === "POST" && req.path === "/v1/images/edits") {
+        const reject = await fitImageEdit(req)
+        if (reject) return res.status(reject.status).json({ error: { message: reject.message, type: "invalid_request_error", code: "request_too_large" } })
+      }
+      return handleOpenAIPassthrough(req, res, req.path.slice("/v1".length))
+    }
+    run().catch(next)
   })
 
   // ----- Google Gemini native API, served by the chat pipeline -----
@@ -119,6 +131,15 @@ export function createApp() {
     }
     if (err instanceof UpstreamUnreachableError) {
       return res.status(502).json({ error: { message: redactErrorMessage(err), type: "upstream_unreachable", code: 502 } })
+    }
+    // Body-parser rejections are the client's (413 too large, 400 bad JSON, …): keep their status.
+    const status = (err as { status?: unknown } | null)?.status
+    if (typeof status === "number" && status >= 400 && status < 500) {
+      const message =
+        status === 413
+          ? `Request body is larger than the ${bodyLimit} limit.`
+          : err instanceof Error ? redactErrorMessage(err) : "bad request"
+      return res.status(status).json({ error: { message, type: "invalid_request_error", code: status === 413 ? "request_too_large" : status } })
     }
     const message = err instanceof Error ? redactErrorMessage(err) : "internal server error"
     res.status(500).json({ error: { message, type: "internal_error" } })

@@ -68,6 +68,27 @@ export async function handleAnthropicPassthrough(req: Request, res: Response, su
 // dall-e-* keep it (they support url/b64_json).
 const isGptImage = (model: unknown) => typeof model === "string" && /^(openai\/)?gpt-image/i.test(model)
 
+/**
+ * JSON /images/edits wants `images: [{image_url}]` and `mask: {image_url}`;
+ * clients often send the multipart field names instead (`image`, plain data
+ * URL / base64 strings). Rewrite those in place; already-valid bodies are untouched.
+ */
+export function normalizeImageEditJson(b: Record<string, unknown>): void {
+  const toRef = (v: unknown) => {
+    if (typeof v !== "string") return v
+    if (/^(data:|https?:)/i.test(v)) return { image_url: v }
+    // Bare base64: name the type from its first bytes.
+    const mime = v.startsWith("/9j/") ? "image/jpeg" : v.startsWith("UklGR") ? "image/webp" : v.startsWith("R0lGOD") ? "image/gif" : "image/png"
+    return { image_url: `data:${mime};base64,${v}` }
+  }
+  if (b.image !== undefined && b.images === undefined) {
+    b.images = Array.isArray(b.image) ? b.image : [b.image]
+    delete b.image
+  }
+  if (Array.isArray(b.images)) b.images = b.images.map(toRef)
+  if (typeof b.mask === "string") b.mask = toRef(b.mask)
+}
+
 /** Remove the `response_format` part from a gpt-image multipart body (edits/variations). */
 export function stripGptImageMultipart(body: Buffer, contentType: string): Buffer {
   const boundary = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType)
@@ -113,6 +134,7 @@ async function proxyRaw(
       const b = req.body as { model?: string; response_format?: unknown }
       b.model = applyModelMap(b.model!)
       if (subpath.startsWith("/images/") && isGptImage(b.model)) delete b.response_format
+      if (subpath === "/images/edits") normalizeImageEditJson(b as Record<string, unknown>)
       if (cfg.gateway) b.model = gatewayModelId(b.model) ?? b.model
     }
     // Always send content-type + a JSON body (even `{}`) on writes — some
