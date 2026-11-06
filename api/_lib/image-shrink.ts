@@ -92,12 +92,12 @@ const tooLarge = (before: number, after?: number): Reject => ({
 
 // ---------- multipart ----------
 
-interface Part {
+export interface Part {
   head: string
   data: Buffer
 }
 
-function parseMultipart(body: Buffer, boundary: string): Part[] | null {
+export function parseMultipart(body: Buffer, boundary: string): Part[] | null {
   const first = Buffer.from(`--${boundary}`)
   const delim = Buffer.from(`\r\n--${boundary}`)
   let pos = body.indexOf(first)
@@ -117,14 +117,14 @@ function parseMultipart(body: Buffer, boundary: string): Part[] | null {
   }
 }
 
-function buildMultipart(parts: Part[], boundary: string): Buffer {
+export function buildMultipart(parts: Part[], boundary: string): Buffer {
   const out: Buffer[] = []
   for (const p of parts) out.push(Buffer.from(`--${boundary}\r\n${p.head}\r\n\r\n`), p.data, Buffer.from("\r\n"))
   out.push(Buffer.from(`--${boundary}--\r\n`))
   return Buffer.concat(out)
 }
 
-const fieldName = (head: string) => /\bname="([^"]*)"/i.exec(head)?.[1] ?? ""
+export const fieldName = (head: string) => /\bname="([^"]*)"/i.exec(head)?.[1] ?? ""
 const partMime = (head: string) => /^content-type:\s*([^\r\n;]+)/im.exec(head)?.[1]?.trim().toLowerCase() ?? ""
 
 function withMime(head: string, mime: string): string {

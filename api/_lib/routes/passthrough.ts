@@ -169,7 +169,13 @@ async function proxyRaw(
     const text = await upstreamRes.text().catch(() => "")
     let out: string
     try {
-      out = JSON.stringify(redactDeep(JSON.parse(text)))
+      const j = redactDeep(JSON.parse(text)) as { request_id?: unknown; error?: { request_id?: unknown } }
+      // The upstream's request id identifies the channel, not anything the client can use.
+      if (j && typeof j === "object") {
+        delete j.request_id
+        if (j.error && typeof j.error === "object") delete j.error.request_id
+      }
+      out = JSON.stringify(j)
     } catch {
       out = redactUrls(text)
     }

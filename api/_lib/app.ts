@@ -9,6 +9,7 @@ import { handleMessages } from "./routes/messages.js"
 import { handleOpenAIPassthrough, handleAnthropicPassthrough } from "./routes/passthrough.js"
 import { handleGemini, handleGeminiModels } from "./routes/gemini.js"
 import { fitImageEdit } from "./image-shrink.js"
+import { handleImageStream, wantsImageStream } from "./routes/image-stream.js"
 import { readOidcToken, UpstreamUnreachableError } from "./upstream.js"
 import { redactErrorMessage } from "./redact.js"
 import { runDiag } from "./diag.js"
@@ -91,7 +92,11 @@ export function createApp() {
         const reject = await fitImageEdit(req)
         if (reject) return res.status(reject.status).json({ error: { message: reject.message, type: "invalid_request_error", code: "request_too_large" } })
       }
-      return handleOpenAIPassthrough(req, res, req.path.slice("/v1".length))
+      const sub = req.path.slice("/v1".length)
+      if (req.method === "POST" && (sub === "/images/generations" || sub === "/images/edits") && wantsImageStream(req)) {
+        return handleImageStream(req, res, sub)
+      }
+      return handleOpenAIPassthrough(req, res, sub)
     }
     run().catch(next)
   })
