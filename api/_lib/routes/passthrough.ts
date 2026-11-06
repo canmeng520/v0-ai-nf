@@ -1,6 +1,6 @@
 import type { Request, Response } from "express"
 import { getOpenAIConfig, getAnthropicConfig, readOidcToken, fetchUpstream, type UpstreamConfig } from "../upstream.js"
-import { applyModelMap, isImageModel, imageModelMisuse } from "../models.js"
+import { applyModelMap, isImageModel, imageModelMisuse, gatewayModelId } from "../models.js"
 import { safeCancel, readWithStall, stallTimeoutMs } from "../sse.js"
 import { logger } from "../logger.js"
 import { redactDeep, redactUrls } from "../redact.js"
@@ -58,7 +58,7 @@ export async function handleAnthropicPassthrough(req: Request, res: Response, su
   const body = req.body as { model?: string } | undefined
   if (body?.model) {
     body.model = applyModelMap(body.model)
-    if (cfg.gateway && !body.model.includes("/")) body.model = `anthropic/${body.model}`
+    if (cfg.gateway) body.model = gatewayModelId(body.model) ?? body.model
   }
   return proxyRaw(req, res, cfg, subpath, headers, "anthropic")
 }
@@ -113,7 +113,7 @@ async function proxyRaw(
       const b = req.body as { model?: string; response_format?: unknown }
       b.model = applyModelMap(b.model!)
       if (subpath.startsWith("/images/") && isGptImage(b.model)) delete b.response_format
-      if (cfg.gateway && !b.model.includes("/")) b.model = `openai/${b.model}`
+      if (cfg.gateway) b.model = gatewayModelId(b.model) ?? b.model
     }
     // Always send content-type + a JSON body (even `{}`) on writes — some
     // gateways 400 a POST without a content-type (e.g. Codex's body-less cancel).

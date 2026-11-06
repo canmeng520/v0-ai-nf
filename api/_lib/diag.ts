@@ -1,5 +1,5 @@
 import { getOpenAIConfig, getAnthropicConfig, type UpstreamCtx } from "./upstream.js"
-import { envDiag } from "./models.js"
+import { envDiag, gatewayModelId } from "./models.js"
 import { describeFetchError } from "./redact.js"
 import { isReasoningModel } from "./convert.js"
 import { proxyPoolSize } from "./proxy-pool.js"
@@ -106,7 +106,7 @@ export async function runDiag(ctx: UpstreamCtx, params: Params) {
     if (cfg.gateway) headers.authorization = `Bearer ${cfg.apiKey}`
     else headers["x-api-key"] = cfg.apiKey
   }
-  const outModel = cfg.gateway ? `${provider}/${model}` : model
+  const outModel = cfg.gateway ? (gatewayModelId(model) ?? model) : model
   // gpt-5+/o-series reject `max_tokens` on chat/completions — mirror the real
   // route's field selection so diag probes these models instead of always 400ing.
   const tokenField = provider === "openai" && isReasoningModel(model) ? "max_completion_tokens" : "max_tokens"

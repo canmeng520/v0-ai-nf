@@ -198,6 +198,21 @@ export function getProvider(model: string): Provider {
   return "openai"
 }
 
+/**
+ * The id a unified `provider/model` gateway expects, or null when a bare id's
+ * vendor isn't known. Never guess: getProvider() defaults unknown ids to
+ * "openai", and `openai/gemini-…` turns whatever made us fail over (a 429, a
+ * 503) into a misleading "not a valid model ID".
+ */
+export function gatewayModelId(model: string): string | null {
+  if (model.includes("/")) return model
+  const known = FALLBACK_MAP.get(model)?.provider
+  if (known === "openai" || known === "anthropic") return `${known}/${model}`
+  if (/^claude/i.test(model)) return `anthropic/${model}`
+  if (/^(gpt-|o\d|chatgpt|dall-e|text-embedding|omni-|codex-)/i.test(model)) return `openai/${model}`
+  return null
+}
+
 /** Split a leading `provider/` segment off a model id, if present. */
 function stripProviderPrefix(id: string): { id: string; provider?: Provider } {
   const slash = id.indexOf("/")

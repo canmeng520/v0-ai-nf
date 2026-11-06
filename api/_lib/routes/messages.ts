@@ -47,13 +47,13 @@ export async function handleMessages(req: Request, res: Response) {
   // 3. Otherwise → convert Anthropic→OpenAI and use the OpenAI chain.
   if (provider === "anthropic") {
     if (anthropicChain.length === 0) return missingUpstream(res, "anthropic")
-    return forwardAnthropicMessages(body, wantStream, res, anthropicChain, "anthropic")
+    return forwardAnthropicMessages(body, wantStream, res, anthropicChain)
   }
 
   // provider === "openai"
   const gatewayEntries = anthropicChain.filter((c) => c.gateway)
   if (anthropicChain[0]?.gateway && gatewayEntries.length > 0) {
-    return forwardAnthropicMessages(body, wantStream, res, gatewayEntries, "openai")
+    return forwardAnthropicMessages(body, wantStream, res, gatewayEntries)
   }
   if (openaiChain.length === 0) return missingUpstream(res, "openai")
   return forwardOpenAIAsAnthropic(body, wantStream, res, openaiChain)
@@ -74,9 +74,8 @@ async function forwardAnthropicMessages(
   wantStream: boolean,
   res: Response,
   chain: UpstreamConfig[],
-  modelProvider: "openai" | "anthropic",
 ) {
-  const candidates = buildAnthropicCandidates(body, chain, modelProvider)
+  const candidates = buildAnthropicCandidates(body, chain)
 
   if (wantStream) {
     const upstreamRes = await acquireStreamingUpstream(res, candidates, "anthropic")
@@ -103,7 +102,7 @@ async function forwardOpenAIAsAnthropic(
 ) {
   const openaiReq = anthropicToOpenaiRequest(body)
   openaiReq.stream = wantStream
-  const candidates = buildOpenAICandidates(openaiReq, chain, "openai")
+  const candidates = buildOpenAICandidates(openaiReq, chain)
 
   if (wantStream) {
     const upstreamRes = await acquireStreamingUpstream(res, candidates, "anthropic")

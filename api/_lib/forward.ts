@@ -8,6 +8,7 @@ import {
   type UpstreamConfig,
 } from "./upstream.js"
 import { isReasoningModel } from "./convert.js"
+import { gatewayModelId } from "./models.js"
 import type { OpenAIChatRequest, AnthropicMessagesRequest } from "./types.js"
 import {
   setSseHeaders,
@@ -35,21 +36,29 @@ export interface UpstreamCandidate {
   origin: string
 }
 
+/**
+ * The chain entries a request may use, each with the model id it gets. A
+ * unified-gateway entry needs `vendor/model`; when a bare id's vendor is
+ * unknown that entry is left out, so a failover can't turn the primary's real
+ * error into "openai/<model> is not a valid model ID". If the gateway is the
+ * only way through, the id goes bare and the gateway reports on it itself.
+ */
+function modelRoutes(model: string, chain: UpstreamConfig[]): Array<{ cfg: UpstreamConfig; model: string }> {
+  const gwId = gatewayModelId(model)
+  const routes = chain.flatMap((cfg) => (!cfg.gateway ? [{ cfg, model }] : gwId ? [{ cfg, model: gwId }] : []))
+  return routes.length ? routes : chain.map((cfg) => ({ cfg, model }))
+}
+
 /** Build one OpenAI chat/completions request per credential-chain entry. */
-export function buildOpenAICandidates(
-  body: OpenAIChatRequest,
-  chain: UpstreamConfig[],
-  modelProvider: "openai" | "anthropic",
-): UpstreamCandidate[] {
-  return chain.map((cfg) => {
-    const outBody: OpenAIChatRequest = { ...body }
+export function buildOpenAICandidates(body: OpenAIChatRequest, chain: UpstreamConfig[]): UpstreamCandidate[] {
+  return modelRoutes(body.model, chain).map(({ cfg, model }) => {
+    const outBody: OpenAIChatRequest = { ...body, model }
     // gpt-5+ / o-series reject `max_tokens`; translate a client-sent value so
     // plain passthrough requests don't 400 on those models.
     if (isReasoningModel(body.model) && outBody.max_tokens != null && outBody.max_completion_tokens == null) {
       outBody.max_completion_tokens = outBody.max_tokens
       delete outBody.max_tokens
     }
-    if (cfg.gateway) outBody.model = `${modelProvider}/${body.model}`
     return {
       url: `${cfg.baseUrl}/chat/completions`,
       init: {
@@ -63,14 +72,10 @@ export function buildOpenAICandidates(
 }
 
 /** Build one Anthropic /v1/messages request per credential-chain entry. */
-export function buildAnthropicCandidates(
-  anthropicReq: AnthropicMessagesRequest,
-  chain: UpstreamConfig[],
-  modelProvider: "openai" | "anthropic",
-): UpstreamCandidate[] {
-  return chain.map((cfg) => {
+export function buildAnthropicCandidates(anthropicReq: AnthropicMessagesRequest, chain: UpstreamConfig[]): UpstreamCandidate[] {
+  return modelRoutes(anthropicReq.model, chain).map(({ cfg, model }) => {
     const outBody: AnthropicMessagesRequest = sanitizeAnthropicBody({ ...anthropicReq }, cfg)
-    if (cfg.gateway) outBody.model = `${modelProvider}/${anthropicReq.model}`
+    outBody.model = model
     const headers: Record<string, string> = {
       "content-type": "application/json",
       "anthropic-version": "2023-06-01",

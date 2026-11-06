@@ -44,13 +44,13 @@ export async function handleChatCompletions(req: Request, res: Response) {
   // 3. Otherwise → convert OpenAI→Anthropic and use the Anthropic chain.
   if (provider === "openai") {
     if (openaiChain.length === 0) return missingUpstream(res, "openai")
-    return forwardOpenAIChat(body, wantStream, res, openaiChain, "openai")
+    return forwardOpenAIChat(body, wantStream, res, openaiChain)
   }
 
   // provider === "anthropic"
   const gatewayEntries = openaiChain.filter((c) => c.gateway)
   if (openaiChain[0]?.gateway && gatewayEntries.length > 0) {
-    return forwardOpenAIChat(body, wantStream, res, gatewayEntries, "anthropic")
+    return forwardOpenAIChat(body, wantStream, res, gatewayEntries)
   }
   if (anthropicChain.length === 0) return missingUpstream(res, "anthropic")
   return forwardAnthropicAsOpenAI(body, wantStream, res, anthropicChain)
@@ -71,9 +71,8 @@ async function forwardOpenAIChat(
   wantStream: boolean,
   res: Response,
   chain: UpstreamConfig[],
-  modelProvider: "openai" | "anthropic",
 ) {
-  const candidates = buildOpenAICandidates(body, chain, modelProvider)
+  const candidates = buildOpenAICandidates(body, chain)
 
   if (wantStream) {
     const upstreamRes = await acquireStreamingUpstream(res, candidates, "openai")
@@ -100,7 +99,7 @@ async function forwardAnthropicAsOpenAI(
 ) {
   const anthropicReq = openaiToAnthropicRequest(body)
   anthropicReq.stream = wantStream
-  const candidates = buildAnthropicCandidates(anthropicReq, chain, "anthropic")
+  const candidates = buildAnthropicCandidates(anthropicReq, chain)
 
   if (wantStream) {
     const upstreamRes = await acquireStreamingUpstream(res, candidates, "openai")
