@@ -9,6 +9,7 @@ import { handleMessages } from "./routes/messages.js"
 import { handleOpenAIPassthrough, handleAnthropicPassthrough } from "./routes/passthrough.js"
 import { handleGemini, handleGeminiModels } from "./routes/gemini.js"
 import { fitImageEdit, editImageCountError } from "./image-shrink.js"
+import { withRequestContext } from "./request-context.js"
 import { handleImageStream, wantsImageStream } from "./routes/image-stream.js"
 import { readOidcToken, UpstreamUnreachableError } from "./upstream.js"
 import { redactErrorMessage } from "./redact.js"
@@ -19,6 +20,8 @@ export function createApp() {
 
   app.disable("x-powered-by")
   app.use(cors({ origin: true, credentials: false }))
+  // Carry the gateway's usage id through to the pool calls this request makes.
+  app.use((req: Request, _res: Response, next: NextFunction) => withRequestContext(req.headers, next))
   // Large enough for high-res image edits, which fitImageEdit shrinks below the
   // upstream limit before forwarding. BODY_LIMIT overrides (e.g. "200mb").
   const bodyLimit = process.env.BODY_LIMIT || "100mb"

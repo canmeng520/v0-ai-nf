@@ -2,6 +2,7 @@ import { fetch as undiciFetch } from "undici"
 import { redactUrls, redactDeep, describeFetchError } from "./redact.js"
 import { logger } from "./logger.js"
 import { pickDispatcher, proxyPoolSize } from "./proxy-pool.js"
+import { poolHeaders } from "./request-context.js"
 
 /** Host for logging (server-side only; safe to include the real host). */
 function hostOf(url: string): string {
@@ -24,6 +25,12 @@ function hostOf(url: string): string {
 function upstreamFetch(url: string, init: RequestInit): Promise<Response> {
   const { dispatcher, label } = pickDispatcher(url)
   if (proxyPoolSize() > 0) logger.debug({ egress: label, host: hostOf(url) }, "upstream egress")
+  const extra = poolHeaders(url)
+  if (Object.keys(extra).length) {
+    const headers = new Headers(init.headers as ConstructorParameters<typeof Headers>[0])
+    for (const [k, v] of Object.entries(extra)) headers.set(k, v)
+    init = { ...init, headers }
+  }
   return undiciFetch(url, { ...(init as object), dispatcher } as never) as unknown as Promise<Response>
 }
 
