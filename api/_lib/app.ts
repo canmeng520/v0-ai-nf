@@ -8,7 +8,7 @@ import { handleChatCompletions } from "./routes/chat-completions.js"
 import { handleMessages } from "./routes/messages.js"
 import { handleOpenAIPassthrough, handleAnthropicPassthrough } from "./routes/passthrough.js"
 import { handleGemini, handleGeminiModels } from "./routes/gemini.js"
-import { fitImageEdit, editImageCountError } from "./image-shrink.js"
+import { fitImageEdit } from "./image-shrink.js"
 import { withRequestContext } from "./request-context.js"
 import { handleImageStream, wantsImageStream } from "./routes/image-stream.js"
 import { readOidcToken, UpstreamUnreachableError } from "./upstream.js"
@@ -92,8 +92,6 @@ export function createApp() {
   app.all("/v1/images/*splat", bearerAuth, (req, res, next) => {
     const run = async () => {
       if (req.method === "POST" && req.path === "/v1/images/edits") {
-        const tooMany = editImageCountError(req)
-        if (tooMany) return res.status(400).json(tooMany)
         const reject = await fitImageEdit(req)
         if (reject) return res.status(reject.status).json({ error: { message: reject.message, type: "invalid_request_error", code: "request_too_large" } })
       }
