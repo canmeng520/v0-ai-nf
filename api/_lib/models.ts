@@ -97,7 +97,6 @@ const NETLIFY_DIRECT_OPENAI = [
   "gpt-image-2.5-flare",
   "gpt-image-2",
   "gpt-image-1.5",
-  "gpt-image-1",
 ]
 
 /**
