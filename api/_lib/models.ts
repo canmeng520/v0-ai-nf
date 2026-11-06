@@ -213,6 +213,22 @@ export function gatewayModelId(model: string): string | null {
   return null
 }
 
+/**
+ * Answers report the model as the gateway routed it (`google/gemini-3.8-flash`,
+ * `anthropic/claude-…`). Clients asked for — and are billed under — the bare
+ * id, so a `vendor/` prefix the client didn't send is dropped from what we
+ * return. Ids the client itself sent with a prefix (OpenRouter-style
+ * `deepseek/…`) and dated snapshots (`gpt-5.4-nano-2026-03-17`) stay as they are.
+ */
+export function clientModelId(returned: unknown, requested?: string): unknown {
+  if (typeof returned !== "string") return returned
+  const slash = returned.indexOf("/")
+  if (slash <= 0) return returned
+  if (requested?.includes("/")) return returned
+  const head = returned.slice(0, slash).toLowerCase()
+  return head in PROVIDER_PREFIXES || head === "gemini" ? returned.slice(slash + 1) : returned
+}
+
 /** Split a leading `provider/` segment off a model id, if present. */
 function stripProviderPrefix(id: string): { id: string; provider?: Provider } {
   const slash = id.indexOf("/")

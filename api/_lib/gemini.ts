@@ -362,7 +362,8 @@ export function openAIToGeminiResponse(resp: Json, model: string): Json {
     if (parts.length === 0) parts.push({ text: "" })
     return { content: { role: "model", parts }, finishReason: finishReason(ch.finish_reason) ?? "STOP", index: ch.index ?? i }
   })
-  const out: Json = { candidates, modelVersion: resp.model ?? model }
+  // The model the client asked for, not the gateway's `google/…` routing id.
+  const out: Json = { candidates, modelVersion: model }
   const usage = usageMetadata(resp.usage)
   if (usage) out.usageMetadata = usage
   if (resp.id) out.responseId = resp.id

@@ -8,7 +8,11 @@ import {
   type UpstreamConfig,
 } from "./upstream.js"
 import { isReasoningModel } from "./convert.js"
-import { gatewayModelId } from "./models.js"
+import { gatewayModelId, clientModelId } from "./models.js"
+
+// `"model":"vendor/id"` inside a JSON event (Anthropic's message_start nests it
+// as message.model; the key is the same).
+const MODEL_FIELD = /("model"\s*:\s*")([^"\\/]+\/[^"\\]+)"/g
 import type { OpenAIChatRequest, AnthropicMessagesRequest } from "./types.js"
 import {
   setSseHeaders,
@@ -322,6 +326,7 @@ export async function pumpRawStream(
   body: ReadableStream<Uint8Array>,
   res: ExpressResponse,
   format: StreamFormat,
+  requestedModel?: string,
 ): Promise<void> {
   const reader = body.getReader()
   res.on("close", () => safeCancel(reader))
@@ -336,6 +341,21 @@ export async function pumpRawStream(
   let tail = ""
   let finished = false
   let failed = false
+  // Drop a gateway `vendor/` prefix from the model the events report (see
+  // clientModelId). Only whole events are rewritten, so an id is never split;
+  // the rest is held until its event's blank line arrives.
+  const rewrite = !requestedModel?.includes("/")
+  const decoder2 = new TextDecoder()
+  let pending = ""
+  const out = (chunk: Uint8Array) => {
+    if (!rewrite) return res.write(Buffer.from(chunk))
+    pending += decoder2.decode(chunk, { stream: true })
+    const cut = pending.lastIndexOf("\n\n")
+    if (cut < 0) return true
+    const ready = pending.slice(0, cut + 2)
+    pending = pending.slice(cut + 2)
+    return res.write(ready.replace(MODEL_FIELD, (_m, q: string, id: string) => `${q}${clientModelId(id, requestedModel)}"`))
+  }
   try {
     for (;;) {
       const result = await readWithStall(reader, stallMs)
@@ -354,12 +374,20 @@ export async function pumpRawStream(
           finished = terminal.test(text)
           tail = text.slice(-32)
         }
-        res.write(Buffer.from(result.value))
+        out(result.value)
       }
     }
   } catch (err) {
     logger.error({ err }, "stream pass-through error")
   } finally {
+    if (pending && !res.writableEnded) {
+      try {
+        res.write(pending)
+      } catch {
+        /* client already gone */
+      }
+      pending = ""
+    }
     if (!finished && !failed && !res.writableEnded) {
       logger.warn({ ms: Date.now() - t0, bytes }, "upstream stream ended without its terminal event")
       try {

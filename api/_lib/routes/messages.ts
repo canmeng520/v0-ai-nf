@@ -1,5 +1,5 @@
 import type { Request, Response } from "express"
-import { getProvider, applyModelMap, isImageModel, imageModelMisuse } from "../models.js"
+import { getProvider, applyModelMap, isImageModel, imageModelMisuse, clientModelId } from "../models.js"
 import {
   getOpenAIConfigChain,
   getAnthropicConfigChain,
@@ -80,7 +80,7 @@ async function forwardAnthropicMessages(
   if (wantStream) {
     const upstreamRes = await acquireStreamingUpstream(res, candidates, "anthropic")
     if (!upstreamRes) return
-    await pumpRawStream(upstreamRes.body!, res, "anthropic")
+    await pumpRawStream(upstreamRes.body!, res, "anthropic", body.model)
     return
   }
 
@@ -90,7 +90,8 @@ async function forwardAnthropicMessages(
     logger.warn({ status, raw }, "anthropic-format upstream error")
     return res.status(status).json(errBody)
   }
-  const json = await readUpstreamJson(upstreamRes)
+  const json = (await readUpstreamJson(upstreamRes)) as { model?: unknown }
+  if (json && typeof json === "object") json.model = clientModelId(json.model, body.model)
   return res.status(200).json(json)
 }
 
@@ -119,6 +120,7 @@ async function forwardOpenAIAsAnthropic(
     return res.status(status).json(errBody)
   }
   const upstreamJson = await readUpstreamJson(upstreamRes)
-  const converted = openaiResponseToAnthropic(upstreamJson as never)
+  const converted = openaiResponseToAnthropic(upstreamJson as never) as { model?: unknown }
+  if (converted && typeof converted === "object") converted.model = clientModelId(converted.model, body.model)
   return res.status(200).json(converted)
 }

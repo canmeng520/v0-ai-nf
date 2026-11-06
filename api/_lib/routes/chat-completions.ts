@@ -1,5 +1,5 @@
 import type { Request, Response } from "express"
-import { getProvider, applyModelMap, isImageModel, imageModelMisuse } from "../models.js"
+import { getProvider, applyModelMap, isImageModel, imageModelMisuse, clientModelId } from "../models.js"
 import {
   getOpenAIConfigChain,
   getAnthropicConfigChain,
@@ -77,7 +77,7 @@ async function forwardOpenAIChat(
   if (wantStream) {
     const upstreamRes = await acquireStreamingUpstream(res, candidates, "openai")
     if (!upstreamRes) return // client error forwarded, or SSE error already emitted
-    await pumpRawStream(upstreamRes.body!, res, "openai")
+    await pumpRawStream(upstreamRes.body!, res, "openai", body.model)
     return
   }
 
@@ -87,7 +87,8 @@ async function forwardOpenAIChat(
     logger.warn({ status, raw }, "openai-format upstream error")
     return res.status(status).json(errBody)
   }
-  const json = await readUpstreamJson(upstreamRes)
+  const json = (await readUpstreamJson(upstreamRes)) as { model?: unknown }
+  if (json && typeof json === "object") json.model = clientModelId(json.model, body.model)
   return res.status(200).json(json)
 }
 
@@ -116,6 +117,7 @@ async function forwardAnthropicAsOpenAI(
     return res.status(status).json(errBody)
   }
   const upstreamJson = await readUpstreamJson(upstreamRes)
-  const converted = anthropicResponseToOpenai(upstreamJson as never)
+  const converted = anthropicResponseToOpenai(upstreamJson as never) as { model?: unknown }
+  if (converted && typeof converted === "object") converted.model = clientModelId(converted.model, body.model)
   return res.status(200).json(converted)
 }
