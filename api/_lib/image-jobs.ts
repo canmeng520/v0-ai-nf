@@ -1,16 +1,19 @@
 /**
- * Image jobs for Netlify: run slow image calls in a background function.
+ * Background jobs for Netlify: run slow calls in a background function.
  *
  * A site function is cut off at ~30s on these accounts, which is too short for
- * gpt-image edits/high-quality generations. A background function gets 15 min
- * but can't answer the caller (it returns 202 immediately), so a job is split:
+ * gpt-image edits/high-quality generations and for long or heavily-reasoning
+ * text completions. A background function gets 15 min but can't answer the
+ * caller (it returns 202 immediately), so a job is split:
  *
- *   POST /v1/jobs/images/<op>   stash the request in Netlify Blobs, kick
+ *   POST /v1/jobs/<route>       stash the request in Netlify Blobs, kick
  *                               `image-job-background`, answer 202 {id}
+ *                               (<route>: images/<op>, chat/completions,
+ *                               messages, responses — non-streaming only)
  *   (background)                replay the stashed request through the normal
- *                               OpenAI passthrough, store status + body
+ *                               route handler, store status + body
  *   GET  /v1/jobs/<id>          202 {status:"pending"} until done, then the
- *                               upstream response verbatim (status + content-type)
+ *                               response verbatim (status + content-type)
  *   POST /v1/jobs/start {id}    kick a job whose request the caller uploaded to
  *                               Blobs itself (bodies over the ~6 MB function limit)
  *
@@ -21,10 +24,24 @@ import { getStore } from "@netlify/blobs"
 import type { Request as ExpressRequest, Response as ExpressResponse } from "express"
 import { toExpressReq, WebResShim } from "./web-adapter.js"
 import { handleOpenAIPassthrough } from "./routes/passthrough.js"
+import { handleChatCompletions } from "./routes/chat-completions.js"
+import { handleMessages } from "./routes/messages.js"
 import { logger } from "./logger.js"
 
 const JOB_TTL_MS = 60 * 60_000
-const OPS = /^\/images\/(generations|edits|variations)$/
+const OPS = /^\/(images\/(generations|edits|variations)|chat\/completions|messages|responses)$/
+
+/** Run one stashed request through the same handler the sync route uses. */
+function handlerFor(sub: string): (req: ExpressRequest, res: ExpressResponse) => Promise<unknown> {
+  if (sub === "/chat/completions") return handleChatCompletions
+  if (sub === "/messages") return handleMessages
+  return (req, res) => handleOpenAIPassthrough(req, res, sub) // images/*, responses
+}
+
+/** A stored job body can't be streamed back; refuse instead of storing an SSE body. */
+function wantsStream(body: unknown): boolean {
+  return !Buffer.isBuffer(body) && typeof body === "object" && body !== null && (body as { stream?: unknown }).stream === true
+}
 const ID_RE = /^(\d{13})-[0-9a-f-]{36}$/
 export const WORKER_PATH = "/.netlify/functions/image-job-background"
 
@@ -39,6 +56,7 @@ const toArrayBuffer = (b: Buffer) => b.buffer.slice(b.byteOffset, b.byteOffset +
 export async function submitImageJob(request: Request, body: unknown, path: string): Promise<Response> {
   const sub = path.slice("/v1/jobs".length)
   if (!OPS.test(sub)) return json(404, { error: { message: `Not found: POST ${path}`, type: "not_found" } })
+  if (wantsStream(body)) return json(400, { error: { message: "streaming requests can't run as a job", type: "invalid_request_error" } })
 
   void sweep().catch((err) => logger.warn({ err }, "image-jobs sweep failed"))
 
@@ -106,19 +124,19 @@ export async function runImageJob(id: string): Promise<void> {
   try {
     const req = await toExpressReq(new Request(`https://job.invalid${path}`, { method: "POST", headers: { "content-type": ct }, body: job.data }), path)
     const res = new WebResShim()
-    await handleOpenAIPassthrough(req as unknown as ExpressRequest, res as unknown as ExpressResponse, path.slice("/v1".length))
+    await handlerFor(path.slice("/v1".length))(req as unknown as ExpressRequest, res as unknown as ExpressResponse)
     const r = await res.getResponse()
     status = r.status
     outCt = r.headers.get("content-type") ?? outCt
     out = await r.arrayBuffer()
   } catch (err) {
-    logger.error({ err, path }, "image job failed")
-    const message = err instanceof Error ? err.message : "image job failed"
+    logger.error({ err, path }, "job failed")
+    const message = err instanceof Error ? err.message : "job failed"
     out = toArrayBuffer(Buffer.from(JSON.stringify({ error: { message, type: "upstream_error", code: 502 } })))
     status = 502
   }
   await store().set(`${id}/res`, out, { metadata: { status, ct: outCt } })
-  logger.info({ path, status, ms: Date.now() - t0, bytes: out.byteLength }, "image job done")
+  logger.info({ path, status, ms: Date.now() - t0, bytes: out.byteLength }, "job done")
 }
 
 /** Drop jobs older than JOB_TTL_MS (the id starts with its creation time). */
