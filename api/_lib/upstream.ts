@@ -240,6 +240,13 @@ const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529])
 /** Cap any single backoff so retries can't blow the serverless function's time limit. */
 const MAX_RETRY_WAIT_MS = 2000
 
+/** The account pool marks a failure it has already retried across every account
+ * and exit (and waited on) with `x-pool-final: 1`. Retrying it here only makes the
+ * client wait another pool round for the same answer, so forward it at once. */
+function isPoolFinal(res: Response): boolean {
+  return res.headers.get("x-pool-final") === "1"
+}
+
 /**
  * How many times to retry a 403 before forwarding it. A 403 is usually a hard
  * error, BUT some gateways (notably the Netlify AI Gateway under bursty load)
@@ -329,7 +336,7 @@ export async function fetchUpstream(
       // Headers received — stop the timer so a slow stream/generation body is
       // never cut, and hand the response to the caller.
       clearTimeout(timer)
-      if (RETRYABLE_STATUS.has(res.status) && attempt < retries) {
+      if (RETRYABLE_STATUS.has(res.status) && attempt < retries && !isPoolFinal(res)) {
         logger.warn({ host, status: res.status, attempt, ms: Date.now() - t0 }, "upstream retryable status")
         await delay(backoffMs(res, attempt))
         continue
@@ -434,6 +441,7 @@ export async function fetchUpstreamUntil(
         continue
       }
       if (!RETRYABLE_STATUS.has(res.status)) return { res, attempts, elapsedMs: Date.now() - start } // other 4xx → forward
+      if (isPoolFinal(res)) return { res, attempts, elapsedMs: Date.now() - start, lastError: `status ${res.status}` }
       lastError = `status ${res.status}`
       logger.warn({ host, status: res.status, attempt, ms: Date.now() - t0 }, "upstream retryable status")
       supersede(res)
