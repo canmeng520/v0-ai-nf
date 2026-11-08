@@ -17,6 +17,11 @@ const REWRITES: Array<[RegExp, string]> = [
   [/^\s*Not Found - Request ID[\s\S]*$/i, "The upstream service is temporarily unavailable. Please retry."],
   // Provider moderation text with its help-center link and request id.
   [/^\s*Your request was rejected by the safety system[\s\S]*$/i, "Your request was rejected by the content safety system. Please modify the prompt and try again."],
+  // gpt-image-2 can't make transparent images; say what does.
+  [
+    /^\s*Transparent background is not supported for this model\.?\s*$/i,
+    "Transparent background is not supported for this model. Use a gpt-image-2.5-* or gpt-image-2.6-* model for transparent images, or omit background / set background=opaque.",
+  ],
 ]
 // Fingerprints that can appear inside otherwise useful messages.
 const REQ_ID_RE = /\s*-?\s*Request ID:?\s*(?:req_)?[0-9A-Za-z_]{16,}\.?/gi
