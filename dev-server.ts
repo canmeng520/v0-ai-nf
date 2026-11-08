@@ -14,7 +14,8 @@ server.headersTimeout = 76_000
 
 // reusePort lets a hot-update container bind the same port before this one
 // leaves; on SIGTERM stop accepting, let in-flight streams finish, then exit.
-server.listen({ port, reusePort: true }, () => {
+// HOST=127.0.0.1 keeps it off the public interfaces (a host reached only through a tunnel).
+server.listen({ port, host: process.env.HOST || undefined, reusePort: true }, () => {
   logger.info({ port }, "ai-proxy api listening (dev)")
 })
 
