@@ -109,7 +109,10 @@ export function normalizeImageEditJson(b: Record<string, unknown>): void {
   if (typeof b.mask === "string") b.mask = toRef(b.mask)
 }
 
-/** Remove the `response_format` part from a gpt-image multipart body (edits/variations). */
+/**
+ * gpt-image multipart body (edits/variations): drop the `response_format` part
+ * and apply the model renaming (applyModelMap) to the `model` part.
+ */
 export function stripGptImageMultipart(body: Buffer, contentType: string): Buffer {
   const boundary = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType)
   if (!boundary) return body
@@ -119,8 +122,16 @@ export function stripGptImageMultipart(body: Buffer, contentType: string): Buffe
   if (!isGptImage(model?.trim())) return body
   const delim = `--${boundary[1] ?? boundary[2]}`
   const parts = s.split(delim)
-  const kept = parts.filter((p) => !/^\r\nContent-Disposition:[^\r\n]*\bname="response_format"/i.test(p))
-  return kept.length === parts.length ? body : Buffer.from(kept.join(delim), "latin1")
+  const mapped = applyModelMap(model!.trim())
+  let changed = false
+  const kept = parts
+    .filter((p) => !/^\r\nContent-Disposition:[^\r\n]*\bname="response_format"/i.test(p))
+    .map((p) => {
+      if (mapped === model!.trim() || !/^\r\nContent-Disposition:[^\r\n]*\bname="model"/i.test(p)) return p
+      changed = true
+      return p.replace(/(\r\n\r\n)[^\r\n]*/, `$1${mapped}`)
+    })
+  return kept.length === parts.length && !changed ? body : Buffer.from(kept.join(delim), "latin1")
 }
 
 /** Forward the request verbatim and stream the response back raw. */

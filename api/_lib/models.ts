@@ -150,24 +150,32 @@ const PROVIDER_PREFIXES: Record<string, Provider | undefined> = {
  * Optional client→upstream model renaming (sub2api's model mapping, env-sized):
  * `MODEL_MAP="gpt-4=gpt-5.4,claude-3-5-sonnet-20241022=claude-sonnet-5"` lets
  * old clients keep their configured names. Unmapped names pass through.
+ *
+ * Image models also lose a reseller suffix: new-api setups list one name per
+ * billing mode (`gpt-image-2.6-flare-openai`, `…-openai-token`) and, with body
+ * pass-through on, forward that name unmapped.
  */
 let modelMapCache: { raw: string | undefined; map: Map<string, string> } | null = null
+const RESELLER_SUFFIX = /-openai(?:-token)?$/i
 
 export function applyModelMap(model: string): string {
   const raw = process.env.MODEL_MAP
-  if (!raw) return model
-  if (!modelMapCache || modelMapCache.raw !== raw) {
-    const map = new Map<string, string>()
-    for (const pair of raw.split(",")) {
-      const eq = pair.indexOf("=")
-      if (eq <= 0) continue
-      const from = pair.slice(0, eq).trim()
-      const to = pair.slice(eq + 1).trim()
-      if (from && to) map.set(from, to)
+  let out = model
+  if (raw) {
+    if (!modelMapCache || modelMapCache.raw !== raw) {
+      const map = new Map<string, string>()
+      for (const pair of raw.split(",")) {
+        const eq = pair.indexOf("=")
+        if (eq <= 0) continue
+        const from = pair.slice(0, eq).trim()
+        const to = pair.slice(eq + 1).trim()
+        if (from && to) map.set(from, to)
+      }
+      modelMapCache = { raw, map }
     }
-    modelMapCache = { raw, map }
+    out = modelMapCache.map.get(model) ?? model
   }
-  return modelMapCache.map.get(model) ?? model
+  return isImageModel(out) ? out.replace(RESELLER_SUFFIX, "") : out
 }
 
 /** Image-only models (gpt-image-*, dall-e-*), optionally `openai/`-prefixed. */
