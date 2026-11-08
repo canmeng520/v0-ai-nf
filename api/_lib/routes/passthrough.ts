@@ -69,6 +69,26 @@ export async function handleAnthropicPassthrough(req: Request, res: Response, su
 const isGptImage = (model: unknown) => typeof model === "string" && /^(openai\/)?gpt-image/i.test(model)
 
 /**
+ * GIF/SVG output fields, made to work for clients that don't send them the way
+ * the upstream insists on:
+ *  - `frame_count` / `frame_duration_ms` as numeric strings (form-style clients)
+ *    become integers; the upstream 400s a string.
+ *  - `output_format: "svg"` without `svg.model` gets a default SVG author
+ *    (SVG_AUTHOR_MODEL, default gpt-5.4-mini: the fastest one we measured).
+ *    Gateways that rebuild the body (e.g. new-api) drop the `svg` object, and
+ *    most clients don't know it exists.
+ */
+export function normalizeImageOutputJson(b: Record<string, unknown>): void {
+  for (const f of ["frame_count", "frame_duration_ms"]) {
+    if (typeof b[f] === "string" && /^\s*\d+\s*$/.test(b[f] as string)) b[f] = Number(b[f])
+  }
+  if (b.output_format !== "svg") return
+  const svg = b.svg && typeof b.svg === "object" && !Array.isArray(b.svg) ? (b.svg as Record<string, unknown>) : b.svg === undefined || b.svg === null ? {} : null
+  if (!svg || (typeof svg.model === "string" && svg.model)) return // a client's own (or malformed) svg is the upstream's to judge
+  b.svg = { ...svg, model: process.env.SVG_AUTHOR_MODEL || "gpt-5.4-mini" }
+}
+
+/**
  * JSON /images/edits wants `images: [{image_url}]` and `mask: {image_url}`;
  * clients often send the multipart field names instead (`image`, plain data
  * URL / base64 strings). Rewrite those in place; already-valid bodies are untouched.
@@ -134,6 +154,7 @@ async function proxyRaw(
       const b = req.body as { model?: string; response_format?: unknown }
       b.model = applyModelMap(b.model!)
       if (subpath.startsWith("/images/") && isGptImage(b.model)) delete b.response_format
+      if (subpath.startsWith("/images/") && isGptImage(b.model)) normalizeImageOutputJson(b as Record<string, unknown>)
       if (subpath === "/images/edits") normalizeImageEditJson(b as Record<string, unknown>)
       if (cfg.gateway) b.model = gatewayModelId(b.model) ?? b.model
     }
