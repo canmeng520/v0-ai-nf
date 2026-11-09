@@ -207,9 +207,58 @@ async function shrinkJson(body: EditJson, size: number): Promise<Fit<EditJson>> 
   return { error: tooLarge(size, last) }
 }
 
+// Free-tier accounts refuse a JSON edit body over ~1 MB ("Request size exceeds
+// the allowed limit for your account tier"; 0.67 MB passed, 1.38 MB didn't)
+// while the same images as multipart pass up to the 16 MB limit. So a bigger
+// JSON edit goes upstream as multipart.
+const JSON_EDIT_LIMIT = envBytes("IMAGE_JSON_EDIT_LIMIT", 900 * 1024)
+const EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" }
+
+/** A JSON edit as multipart, or null when it can't be (URL / file_id images, object-valued fields). */
+function jsonEditToMultipart(body: Record<string, unknown>): { body: Buffer; contentType: string } | null {
+  if (!isGptImage(body.model) || !Array.isArray(body.images)) return null
+  const file = (name: string, ref: unknown): Part | null => {
+    const m = typeof (ref as ImageRef)?.image_url === "string" ? DATA_URL.exec((ref as ImageRef).image_url as string) : null
+    if (!m?.[2]) return null
+    const mime = m[1] || "image/png"
+    return { head: `Content-Disposition: form-data; name="${name}"; filename="${name.replace(/\W/g, "")}.${EXT[mime] ?? "png"}"\r\nContent-Type: ${mime}`, data: Buffer.from(m[3], "base64") }
+  }
+  const parts: Part[] = []
+  for (const [k, v] of Object.entries(body)) {
+    if (k === "images" || v === undefined || v === null) continue
+    if (k === "mask" || k === "markup") {
+      const p = file(k, v)
+      if (!p) return null
+      parts.push(p)
+    } else if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+      parts.push({ head: `Content-Disposition: form-data; name="${k}"`, data: Buffer.from(String(v)) })
+    } else return null
+  }
+  const images = body.images as unknown[]
+  for (const ref of images) {
+    const p = file(images.length > 1 ? "image[]" : "image", ref)
+    if (!p) return null
+    parts.push(p)
+  }
+  const boundary = `----platcloud${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
+  return { body: buildMultipart(parts, boundary), contentType: `multipart/form-data; boundary=${boundary}` }
+}
+
+/** Send a JSON edit that is over the JSON limit as multipart instead. */
+function jsonToMultipartIfBig(req: Request): void {
+  const size = Buffer.byteLength(JSON.stringify(req.body))
+  if (size <= JSON_EDIT_LIMIT) return
+  const mp = jsonEditToMultipart(req.body as Record<string, unknown>)
+  if (!mp) return
+  req.body = mp.body
+  req.headers["content-type"] = mp.contentType
+  logger.info({ json: size, multipart: mp.body.length }, "image edit sent as multipart")
+}
+
 /**
  * POST /v1/images/edits: normalize JSON edits, then shrink an oversized body in
- * place. Returns an error to send instead (status + message), or null to go on.
+ * place; a JSON body still too big for JSON goes on as multipart. Returns an
+ * error to send instead (status + message), or null to go on.
  */
 export async function fitImageEdit(req: Request): Promise<Reject | null> {
   const t0 = Date.now()
@@ -234,16 +283,18 @@ export async function fitImageEdit(req: Request): Promise<Reject | null> {
   if (!req.body || typeof req.body !== "object") return null
   normalizeImageEditJson(req.body as Record<string, unknown>)
   const before = Buffer.byteLength(JSON.stringify(req.body))
-  if (before <= SHRINK_ABOVE) return null
-  try {
-    const r = await withSlot(() => shrinkJson(req.body as EditJson, before))
-    if (!r) return before > BODY_LIMIT ? tooLarge(before) : null
-    if ("error" in r) return r.error
-    req.body = r.body
-    logger.info({ before, after: Buffer.byteLength(JSON.stringify(r.body)), ms: Date.now() - t0 }, "image edit shrunk (json)")
-    return null
-  } catch (err) {
-    logger.warn({ err, before }, "image shrink failed")
-    return before > BODY_LIMIT ? { status: 400, message: `Could not read the input image: ${(err as Error).message}` } : null
+  if (before > SHRINK_ABOVE) {
+    try {
+      const r = await withSlot(() => shrinkJson(req.body as EditJson, before))
+      if (!r) return before > BODY_LIMIT ? tooLarge(before) : (jsonToMultipartIfBig(req), null)
+      if ("error" in r) return r.error
+      req.body = r.body
+      logger.info({ before, after: Buffer.byteLength(JSON.stringify(r.body)), ms: Date.now() - t0 }, "image edit shrunk (json)")
+    } catch (err) {
+      logger.warn({ err, before }, "image shrink failed")
+      if (before > BODY_LIMIT) return { status: 400, message: `Could not read the input image: ${(err as Error).message}` }
+    }
   }
+  jsonToMultipartIfBig(req)
+  return null
 }
