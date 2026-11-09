@@ -64,10 +64,16 @@ let rr = 0
 // and run again from scratch. Leave timing to the callers' AbortSignals.
 const NO_UNDICI_TIMEOUTS = { headersTimeout: 0, bodyTimeout: 0 }
 
+// Connections per origin. Every request on this host goes to one origin (the
+// account pool on localhost), and an image job holds its connection for 20-60 s,
+// so this is the app's real concurrency limit: at 128, requests past it queued
+// here (app p50 61 s vs 14 s in the pool under a load test). Default 2048.
+const MAX_CONNECTIONS = Number(process.env.UPSTREAM_MAX_CONNECTIONS) || 2048
+
 /** Direct (no-proxy) dispatcher: shared keep-alive pool. */
 const directDispatcher = new UndiciAgent({
   keepAliveTimeout: 60_000,
-  connections: 128,
+  connections: MAX_CONNECTIONS,
   connect: { timeout: 10_000 },
   ...NO_UNDICI_TIMEOUTS,
 })
