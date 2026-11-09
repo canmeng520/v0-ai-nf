@@ -191,6 +191,9 @@ async function proxyRaw(
   res.status(upstreamRes.status)
   const ct = upstreamRes.headers.get("content-type")
   if (ct) res.setHeader("content-type", ct)
+  // A 429 from the account pool (image capacity full) says when to come back.
+  const retryAfter = upstreamRes.headers.get("retry-after")
+  if (retryAfter && upstreamRes.status === 429) res.setHeader("retry-after", retryAfter)
   if (!upstreamRes.body) {
     res.end()
     return
