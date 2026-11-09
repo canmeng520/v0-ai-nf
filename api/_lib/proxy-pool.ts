@@ -58,11 +58,18 @@ interface Pool {
 let poolCache: Pool | null = null
 let rr = 0
 
+// undici's own limits (300 s for headers, 300 s between body chunks) would cut
+// a slow image job before the caller's timeouts (UPSTREAM_FIRST_BYTE_MS,
+// PASSTHROUGH_FIRST_BYTE_MS: 10-11 min) apply; the job was then thrown away
+// and run again from scratch. Leave timing to the callers' AbortSignals.
+const NO_UNDICI_TIMEOUTS = { headersTimeout: 0, bodyTimeout: 0 }
+
 /** Direct (no-proxy) dispatcher: shared keep-alive pool. */
 const directDispatcher = new UndiciAgent({
   keepAliveTimeout: 60_000,
   connections: 128,
   connect: { timeout: 10_000 },
+  ...NO_UNDICI_TIMEOUTS,
 })
 
 function getPool(): Pool | null {
@@ -74,7 +81,7 @@ function getPool(): Pool | null {
     poolCache = null
     return null
   }
-  const dispatchers = urls.map((u) => new ProxyAgent({ uri: u, connect: { timeout: 10_000 } }))
+  const dispatchers = urls.map((u) => new ProxyAgent({ uri: u, connect: { timeout: 10_000 }, ...NO_UNDICI_TIMEOUTS }))
   // Label = host:port only (never the credentials) for logs/diag.
   const labels = urls.map((u) => {
     try {
