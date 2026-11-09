@@ -7,7 +7,8 @@
  * gpt-image models work on downscaled inputs anyway, so an oversized body is
  * fixed by re-encoding its big images: each is fitted inside a max side and
  * stored as WebP (keeps alpha); a mask follows its image's new size and stays
- * PNG. Bodies at or under IMAGE_SHRINK_ABOVE bytes are left untouched.
+ * PNG. Bodies at or under IMAGE_SHRINK_ABOVE bytes (4 MiB) are left untouched;
+ * bigger ones are shrunk toward IMAGE_SHRINK_TARGET (see below).
  *
  * Only the Express app (VPS) imports this: sharp is a native module, and the
  * Netlify sites only ever receive bodies the VPS already prepared.
@@ -22,8 +23,14 @@ const envBytes = (name: string, dflt: number) => {
   const v = Number(process.env[name])
   return Number.isFinite(v) && v > 0 ? v : dflt
 }
-// Touch a request only above this size, and make it end up at or under the limit.
-const SHRINK_ABOVE = envBytes("IMAGE_SHRINK_ABOVE", 12 * MiB)
+// Touch a request only above SHRINK_ABOVE, aiming at or under SHRINK_TARGET.
+// 4 MiB is where the pool stops submitting a job inline and uploads the body to
+// the account's Blobs store first — a step Netlify refuses in bursts (403) on
+// accounts that serve fine. Staying under it skips the upload altogether. If no
+// pass reaches the target (many big images), the smallest result still goes,
+// through the upload, as long as it is under BODY_LIMIT (the hard limit).
+const SHRINK_ABOVE = envBytes("IMAGE_SHRINK_ABOVE", 4 * MiB)
+const SHRINK_TARGET = envBytes("IMAGE_SHRINK_TARGET", 3.8 * MiB)
 const BODY_LIMIT = envBytes("IMAGE_BODY_LIMIT", 15 * MiB)
 // Images this small (and within the side limit) are kept byte for byte.
 const KEEP_UNDER = 1 * MiB
@@ -143,6 +150,7 @@ async function shrinkMultipart(body: Buffer, boundary: string): Promise<Fit<Buff
   // Both overlay the first image, so both follow its new size.
   const isOverlay = (p: Part) => fieldName(p.head) === "mask" || fieldName(p.head) === "markup"
   let last = body.length
+  let best: Buffer | null = null
   for (const pass of PASSES) {
     const out: Part[] = []
     let firstImage: Encoded | null = null
@@ -161,12 +169,20 @@ async function shrinkMultipart(body: Buffer, boundary: string): Promise<Fit<Buff
     }
     const next = buildMultipart(out, boundary)
     last = next.length
-    if (next.length <= BODY_LIMIT) return { body: next }
+    if (next.length <= SHRINK_TARGET) return { body: next }
+    if (next.length <= BODY_LIMIT && (!best || next.length < best.length)) best = next
   }
-  return { error: tooLarge(body.length, last) }
+  // Target missed: the smallest fit still beats the original (it goes through the Blobs upload).
+  if (best) return { body: best.length < body.length ? best : body }
+  return body.length <= BODY_LIMIT ? { body } : { error: tooLarge(body.length, last) }
 }
 
 // ---------- JSON (data URLs) ----------
+
+// A big JSON edit goes on as multipart (see jsonToMultipartIfBig): base64 is 4/3
+// the bytes, so the JSON-side numbers that land at SHRINK_ABOVE / SHRINK_TARGET.
+const JSON_ABOVE = SHRINK_ABOVE * 4 / 3
+const JSON_TARGET = SHRINK_TARGET * 4 / 3
 
 interface ImageRef {
   image_url?: unknown
@@ -180,6 +196,7 @@ async function shrinkJson(body: EditJson, size: number): Promise<Fit<EditJson>> 
   const overlayUrl = (r?: ImageRef) => (typeof r?.image_url === "string" ? DATA_URL.exec(r.image_url) : null)
   if (!originals.some((m) => m?.[2])) return null // nothing inline to shrink (URLs / file ids)
   let last = size
+  let best: EditJson | null = null, bestSize = Infinity
   for (const pass of PASSES) {
     let firstImage: Encoded | null = null
     const images: ImageRef[] = []
@@ -202,9 +219,11 @@ async function shrinkJson(body: EditJson, size: number): Promise<Fit<EditJson>> 
       next[k] = { ...body[k], image_url: `data:image/png;base64,${png.toString("base64")}` }
     }
     last = Buffer.byteLength(JSON.stringify(next))
-    if (last <= BODY_LIMIT) return { body: next }
+    if (last <= JSON_TARGET) return { body: next }
+    if (last <= BODY_LIMIT && last < bestSize) { best = next; bestSize = last }
   }
-  return { error: tooLarge(size, last) }
+  if (best) return { body: bestSize < size ? best : body }
+  return size <= BODY_LIMIT ? { body } : { error: tooLarge(size, last) }
 }
 
 // Free-tier accounts refuse a JSON edit body over ~1 MB ("Request size exceeds
@@ -283,7 +302,7 @@ export async function fitImageEdit(req: Request): Promise<Reject | null> {
   if (!req.body || typeof req.body !== "object") return null
   normalizeImageEditJson(req.body as Record<string, unknown>)
   const before = Buffer.byteLength(JSON.stringify(req.body))
-  if (before > SHRINK_ABOVE) {
+  if (before > JSON_ABOVE) {
     try {
       const r = await withSlot(() => shrinkJson(req.body as EditJson, before))
       if (!r) return before > BODY_LIMIT ? tooLarge(before) : (jsonToMultipartIfBig(req), null)
