@@ -74,7 +74,7 @@ async function encodeImage(data: Buffer, mime: string, side: number, quality: nu
   return { data: out, mime: "image/webp", width: info.width, height: info.height, changed: true }
 }
 
-/** A mask must match its image's dimensions exactly. */
+/** A mask or markup layer must match its image's dimensions exactly (PNG keeps the alpha). */
 async function encodeMask(data: Buffer, width: number, height: number): Promise<Buffer> {
   return sharp(data, { limitInputPixels: MAX_PIXELS }).rotate().resize({ width, height, fit: "fill" }).png().toBuffer()
 }
@@ -140,7 +140,8 @@ async function shrinkMultipart(body: Buffer, boundary: string): Promise<Fit<Buff
   const model = parts.find((p) => fieldName(p.head) === "model")?.data.toString("utf8").trim()
   if (!isGptImage(model)) return null
   const isImage = (p: Part) => /^image(\[\d*\])?$/.test(fieldName(p.head)) && (partMime(p.head).startsWith("image/") || /filename=/i.test(p.head))
-  const isMask = (p: Part) => fieldName(p.head) === "mask"
+  // Both overlay the first image, so both follow its new size.
+  const isOverlay = (p: Part) => fieldName(p.head) === "mask" || fieldName(p.head) === "markup"
   let last = body.length
   for (const pass of PASSES) {
     const out: Part[] = []
@@ -154,9 +155,9 @@ async function shrinkMultipart(body: Buffer, boundary: string): Promise<Fit<Buff
       firstImage ??= e
       out.push(e.changed ? { head: withMime(p.head, e.mime), data: e.data } : p)
     }
-    const mask = out.findIndex(isMask)
-    if (mask >= 0 && firstImage?.changed) {
-      out[mask] = { head: withMime(out[mask].head, "image/png"), data: await encodeMask(out[mask].data, firstImage.width, firstImage.height) }
+    for (let i = 0; i < out.length; i++) {
+      if (!isOverlay(out[i]) || !firstImage?.changed) continue
+      out[i] = { head: withMime(out[i].head, "image/png"), data: await encodeMask(out[i].data, firstImage.width, firstImage.height) }
     }
     const next = buildMultipart(out, boundary)
     last = next.length
@@ -172,11 +173,11 @@ interface ImageRef {
 }
 const DATA_URL = /^data:([^;,]*)(;base64)?,(.*)$/s
 
-type EditJson = { model?: unknown; images?: ImageRef[]; mask?: ImageRef }
+type EditJson = { model?: unknown; images?: ImageRef[]; mask?: ImageRef; markup?: ImageRef }
 async function shrinkJson(body: EditJson, size: number): Promise<Fit<EditJson>> {
   if (!isGptImage(body.model) || !Array.isArray(body.images)) return null
   const originals = body.images.map((r) => (typeof r?.image_url === "string" ? DATA_URL.exec(r.image_url) : null))
-  const maskUrl = typeof body.mask?.image_url === "string" ? DATA_URL.exec(body.mask.image_url) : null
+  const overlayUrl = (r?: ImageRef) => (typeof r?.image_url === "string" ? DATA_URL.exec(r.image_url) : null)
   if (!originals.some((m) => m?.[2])) return null // nothing inline to shrink (URLs / file ids)
   let last = size
   for (const pass of PASSES) {
@@ -192,12 +193,14 @@ async function shrinkJson(body: EditJson, size: number): Promise<Fit<EditJson>> 
       if (i === 0) firstImage = e
       images.push(e.changed ? { ...body.images[i], image_url: `data:${e.mime};base64,${e.data.toString("base64")}` } : body.images[i])
     }
-    let mask = body.mask
-    if (maskUrl?.[2] && firstImage?.changed) {
-      const png = await encodeMask(Buffer.from(maskUrl[3], "base64"), firstImage.width, firstImage.height)
-      mask = { ...body.mask, image_url: `data:image/png;base64,${png.toString("base64")}` }
+    // mask and markup overlay the first image, so both follow its new size.
+    const next: EditJson = { ...body, images }
+    for (const k of ["mask", "markup"] as const) {
+      const m = overlayUrl(body[k])
+      if (!m?.[2] || !firstImage?.changed) continue
+      const png = await encodeMask(Buffer.from(m[3], "base64"), firstImage.width, firstImage.height)
+      next[k] = { ...body[k], image_url: `data:image/png;base64,${png.toString("base64")}` }
     }
-    const next = { ...body, images, ...(mask ? { mask } : {}) }
     last = Buffer.byteLength(JSON.stringify(next))
     if (last <= BODY_LIMIT) return { body: next }
   }

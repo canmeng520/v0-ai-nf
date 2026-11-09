@@ -107,6 +107,7 @@ export function normalizeImageEditJson(b: Record<string, unknown>): void {
   }
   if (Array.isArray(b.images)) b.images = b.images.map(toRef)
   if (typeof b.mask === "string") b.mask = toRef(b.mask)
+  if (typeof b.markup === "string") b.markup = toRef(b.markup)
 }
 
 /**
